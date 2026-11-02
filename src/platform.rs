@@ -122,8 +122,63 @@ mod autostart {
     use std::process::Command;
 
     const UNIT: &str = "sing-box-panel";
+    const PROCD_SCRIPT: &str = "/etc/init.d/sing-box-panel";
+
+    /// 面板可用的初始化系统。
+    #[derive(PartialEq, Clone, Copy)]
+    enum InitKind {
+        Systemd,
+        /// OpenWrt 的 procd（/etc/init.d + rc.common）。
+        Procd,
+    }
+
+    /// 识别初始化系统：/run/systemd/system 是 systemd 的标准标志；
+    /// 否则认 OpenWrt（procd）——只有它有 rc.common 体系，写 init 脚本才有意义。
+    fn init_kind() -> Option<InitKind> {
+        if std::path::Path::new("/run/systemd/system").exists() {
+            return Some(InitKind::Systemd);
+        }
+        if std::path::Path::new("/etc/openwrt_release").exists()
+            || std::path::Path::new("/lib/functions/procd.sh").exists()
+        {
+            return Some(InitKind::Procd);
+        }
+        None
+    }
 
     pub fn enabled() -> Result<bool, String> {
+        match init_kind() {
+            Some(InitKind::Systemd) => systemd_enabled(),
+            Some(InitKind::Procd) => procd_enabled(),
+            None => Err("未检测到 systemd 或 OpenWrt procd，无法管理开机自启".into()),
+        }
+    }
+
+    /// 只负责 enable/disable；unit/脚本已存在时不改写（保留手工维护的环境变量与参数），
+    /// 缺失时按当前 exe/data 目录生成。
+    pub fn set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
+        match init_kind() {
+            Some(InitKind::Systemd) => systemd_set(on, data_dir),
+            Some(InitKind::Procd) => procd_set(on, data_dir),
+            None => Err("未检测到 systemd 或 OpenWrt procd，无法管理开机自启".into()),
+        }
+    }
+
+    pub fn note() -> String {
+        match init_kind() {
+            Some(InitKind::Systemd) => {
+                "systemd 服务 sing-box-panel；开启即 systemctl enable（unit 缺失时自动生成）".into()
+            }
+            Some(InitKind::Procd) => {
+                "OpenWrt procd 服务 sing-box-panel；开启即生成 /etc/init.d 脚本并 enable".into()
+            }
+            None => "未检测到 systemd 或 OpenWrt procd，开机自启不可用".into(),
+        }
+    }
+
+    /* ---------- systemd（Debian / Ubuntu / 常规发行版） ---------- */
+
+    fn systemd_enabled() -> Result<bool, String> {
         let out = Command::new("systemctl")
             .args(["is-enabled", UNIT])
             .output()
@@ -136,9 +191,7 @@ mod autostart {
         }
     }
 
-    /// 只负责 enable/disable；unit 已存在时不改写（保留手工维护的环境变量与参数），
-    /// 缺失时按当前 exe/data 目录生成一份最小 unit。
-    pub fn set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
+    fn systemd_set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
         if unsafe { libc::geteuid() } != 0 {
             return Err("修改开机自启需要面板以 root 身份运行".into());
         }
@@ -178,8 +231,80 @@ mod autostart {
         Ok(())
     }
 
-    pub fn note() -> &'static str {
-        "systemd 服务 sing-box-panel；开启即 systemctl enable（unit 缺失时自动生成）"
+    /* ---------- procd（OpenWrt / ImmortalWrt） ---------- */
+
+    fn procd_enabled() -> Result<bool, String> {
+        if !std::path::Path::new(PROCD_SCRIPT).exists() {
+            return Ok(false);
+        }
+        // rc.common 的 enabled 动作：rc.d 里有 S??symlink 时返回 0
+        let out = Command::new(PROCD_SCRIPT)
+            .arg("enabled")
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(out.status.success())
+    }
+
+    fn procd_set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
+        if unsafe { libc::geteuid() } != 0 {
+            return Err("修改开机自启需要面板以 root 身份运行".into());
+        }
+        if !on {
+            if !std::path::Path::new(PROCD_SCRIPT).exists() {
+                return Ok(());
+            }
+            let out = Command::new(PROCD_SCRIPT)
+                .arg("disable")
+                .output()
+                .map_err(|e| e.to_string())?;
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if !out.status.success() {
+                return Err(format!("disable 失败: {msg}"));
+            }
+            return Ok(());
+        }
+        let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let self_exe = self_exe.canonicalize().unwrap_or(self_exe);
+        if !std::path::Path::new(PROCD_SCRIPT).exists() {
+            // procd 的 respawn：运行满 3600s 后崩溃则计数清零，5s 后重启，0=不限次数
+            let script = format!(
+                r#"#!/bin/sh /etc/rc.common
+# sing-box panel 开机自启（由面板生成；改过路径后请在面板里重新开关一次自启）
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG="{exe}"
+DATA="{data}"
+
+start_service() {{
+    procd_open_instance
+    procd_set_param command "$PROG" -data "$DATA"
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}}
+"#,
+                exe = self_exe.display(),
+                data = data_dir.display()
+            );
+            std::fs::write(PROCD_SCRIPT, script)
+                .map_err(|e| format!("写入 init 脚本失败: {e}"))?;
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(PROCD_SCRIPT, std::fs::Permissions::from_mode(0o755));
+        }
+        let out = Command::new(PROCD_SCRIPT)
+            .arg("enable")
+            .output()
+            .map_err(|e| e.to_string())?;
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if !out.status.success() {
+            return Err(format!("enable 失败: {msg}"));
+        }
+        Ok(())
     }
 }
 

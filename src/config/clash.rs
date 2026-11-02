@@ -72,8 +72,41 @@ pub fn render_clash(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec
     apply_clash_ports(obj, opts);
     apply_clash_listeners(obj, opts);
     apply_clash_tun(obj, opts);
+    apply_clash_sniffer(obj);
 
     serde_yaml::to_string(&tpl).map(|s| s.into_bytes()).map_err(|e| format!("marshal yaml: {e}"))
+}
+
+/// redirect/tproxy 接管进来的连接只有目标 IP，没有域名。
+/// mihomo 必须开 sniffer（TLS SNI / HTTP Host）才能把这些纯 IP 连接
+/// 按域名走规则分流，否则国外域名会被路由到污染 IP 上直连失败。
+/// sing-box 侧由路由规则里的 {"action":"sniff"} 承担同样职责。
+fn apply_clash_sniffer(tpl: &mut Map<String, Value>) {
+    let sniffer = json!({
+        "enable": true,
+        "sniff": {
+            "TLS": {"ports": [443, 8443], "override-destination": true},
+            "HTTP": {"ports": [80, "8080-8880"], "override-destination": true},
+            "QUIC": {"ports": [443], "override-destination": true}
+        },
+        "force-dns-mapping": true,
+        "parse-pure-ip": true,
+        "override-destination": true
+    });
+    match tpl.get_mut("sniffer") {
+        Some(v) if v.is_object() => {
+            // 模板里已有 sniffer：只保证 enable 与嗅探结果覆盖打开
+            if let Some(o) = v.as_object_mut() {
+                o.insert("enable".into(), json!(true));
+                o.entry("parse-pure-ip".to_string()).or_insert(json!(true));
+                o.entry("force-dns-mapping".to_string()).or_insert(json!(true));
+                o.entry("override-destination".to_string()).or_insert(json!(true));
+            }
+        }
+        _ => {
+            tpl.insert("sniffer".into(), sniffer);
+        }
+    }
 }
 
 fn apply_clash_routing(tpl: &mut Map<String, Value>, mode: &str) {

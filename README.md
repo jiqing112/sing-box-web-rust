@@ -51,7 +51,7 @@
 - **安全**：登录限速（5 次锁 30s 翻倍至 15min）、Bearer token（7 天、上限 64）、
   面板内关闭登录开关、`panel.conf` 忘密重置、登录哈希 sha256(user:pass)。
 - **运维**：配置快照（默认 3 份、孤儿 GC）、失败回滚、监听地址热切换（含同端口换绑回滚）、
-  panel.conf 回写、systemd/计划任务两级开机自启、进程 RSS 上报（psapi / VmRSS）。
+  panel.conf 回写、systemd / OpenWrt procd / 计划任务开机自启（按 init 系统自动适配）、进程 RSS 上报（psapi / VmRSS）。
 - **前端**：与 Go 版同一套 `web/dist`（无框架原生 JS），ETag 协商缓存 + SPA fallback，零改动复用。
 
 ## 与 Go 版的实现差异（不影响功能）
