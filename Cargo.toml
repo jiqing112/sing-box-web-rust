@@ -1,0 +1,43 @@
+[package]
+name = "sing-box-web"
+version = "1.0.0"
+edition = "2021"
+description = "sing-box / mihomo web control panel for low-end routers (MT7981 / 16MB flash)"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "signal", "time", "io-util", "sync", "macros", "fs"] }
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream", "json"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+url = "2"
+if-addrs = "0.13"
+sha2 = "0.10"
+md-5 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+getrandom = "0.2"
+percent-encoding = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows 上用系统 schannel（native-tls），避免引入 openssl；
+# Linux 上走 rustls（ring），musl 静态链接友好。
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[features]
+default = ["embed-geo"]
+# 关闭后二进制小 5 MB，代价是首次切 mihomo 需联网下载 geo 数据
+embed-geo = []

@@ -1,0 +1,23 @@
+[Unit]
+Description=sing-box panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sing-box-panel
+ExecStart=/opt/sing-box-panel/bin/panel -listen 0.0.0.0:9090 -data /opt/sing-box-panel/data
+# 可选：用环境变量初始化口令与静态 API Token。
+# 首次启动如果不设置 PANEL_PASSWORD，面板会生成随机口令并写入
+# /opt/sing-box-panel/data/initial-password（登录后请改掉并删除该文件）。
+# 这两行默认注释掉，避免把弱口令带上线；需要时取消注释并改成自己的值。
+#Environment=PANEL_TOKEN=
+#Environment=PANEL_PASSWORD=
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+# 面板自己管理 sing-box 子进程，停止时要整组收掉
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

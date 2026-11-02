@@ -1,0 +1,8 @@
+/target
+.test/
+.tools/
+.chrome-shot/
+.shots/
+*.log
+panel-data/
+go-migrate-data/

@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sing-box panel</title>
+<script>
+  (function () {
+    var t = localStorage.getItem('sb_theme');
+    if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<link rel="stylesheet" href="styles.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0d10'/%3E%3Cpath d='M16 6l8 4.6v10.8L16 26l-8-4.6V10.6z' fill='none' stroke='%23c6ff4d' stroke-width='1.6'/%3E%3Ccircle cx='16' cy='16' r='2.6' fill='%23c6ff4d'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-dash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="8.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="5" rx="1.6"/><rect x="13.5" y="11.5" width="7.5" height="9.5" rx="1.6"/><rect x="3" y="15" width="7.5" height="6" rx="1.6"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.1"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 6-6 6 6 6M16 6l6 6-6 6"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-7 5 14L17 12h4"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 3v5.5c0 4.6-3.1 8.3-7.5 9.5-4.4-1.2-7.5-4.9-7.5-9.5V6z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-1.6 6"/><path d="M20 5v6h-6"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 21 20H3z"/><path d="M12 9.5v4.5M12 17.2h.01"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8h.01"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/><path d="M10 3v3.5M14 3v3.5M10 17.5V21M14 17.5V21M3 10h3.5M3 14h3.5M17.5 10H21M17.5 14H21"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.2 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.2-3.6-8.5S9.6 5.8 12 3.5z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M15 6V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h1"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V4.8h5V7M6.5 7l.8 12.2a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8L17.5 7"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.5-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.5l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4z"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m12 3 8.5 4.6L12 12.2 3.5 7.6z"/><path d="m4 12 8 4.4 8-4.4M4 16.4l8 4.4 8-4.4"/></symbol>
+    <symbol id="i-lan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="5" rx="1.4"/><rect x="2.5" y="16" width="6" height="5" rx="1.4"/><rect x="15.5" y="16" width="6" height="5" rx="1.4"/><path d="M12 8v4.5M5.5 16v-3.5h13V16"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5h11a5.5 5.5 0 0 1 0 11H8"/><path d="M7 4.5 3 8.5l4 4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2.5 12h2M19.5 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></symbol>
+  </defs>
+</svg>
+
+<!-- ============================================================ LOGIN -->
+<div class="login" id="login">
+  <form class="login-card" id="loginForm" autocomplete="off">
+    <div class="brand" style="padding:0 0 22px">
+      <div class="brand-mark"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 2.6 20 7v10l-8 4.4L4 17V7z"/><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/></svg></div>
+      <div class="brand-text"><div class="brand-name">sing-box</div><div class="brand-sub">panel</div></div>
+    </div>
+    <h1 style="font-size:19px;margin:0 0 6px;letter-spacing:-.02em">登录控制台</h1>
+    <p style="margin:0 0 20px;color:var(--text-3);font-size:12px">登录态使用 Bearer Token，不使用 Cookie。</p>
+    <div class="field" style="margin-bottom:10px"><label>用户名</label><input class="input" id="loginUser" value="admin" style="width:100%;height:34px" /></div>
+    <div class="field" style="margin-bottom:16px"><label>密码</label><input class="input" id="loginPass" type="password" style="width:100%;height:34px" placeholder="••••••••" /></div>
+    <button class="btn primary block" type="submit" id="loginBtn" style="height:34px">登录</button>
+    <div class="login-err" id="loginErr"></div>
+    <div style="margin-top:18px;font-size:10.5px;color:var(--text-4);font-family:var(--mono);text-align:center">sing-box panel</div>
+  </form>
+</div>
+
+<div class="app" id="app" style="display:none">
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-mark"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 2.6 20 7v10l-8 4.4L4 17V7z"/><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/></svg></div>
+      <div class="brand-text"><div class="brand-name">sing-box</div><div class="brand-sub">panel</div></div>
+    </div>
+
+    <div class="side-scroll">
+      <div class="nav-label">管理</div>
+      <button class="nav-item active" data-page="dashboard"><svg width="15" height="15"><use href="#i-dash"/></svg><span>概览</span></button>
+      <button class="nav-item" data-page="subs"><svg width="15" height="15"><use href="#i-link"/></svg><span>订阅</span><em class="count" id="navSubs">0</em></button>
+      <button class="nav-item" data-page="nodes"><svg width="15" height="15"><use href="#i-server"/></svg><span>节点</span><em class="count" id="navNodes">0</em></button>
+      <button class="nav-item" data-page="config"><svg width="15" height="15"><use href="#i-code"/></svg><span>配置</span></button>
+      <button class="nav-item" data-page="service"><svg width="15" height="15"><use href="#i-activity"/></svg><span>服务</span></button>
+      <div class="nav-label">网络</div>
+      <button class="nav-item" data-page="tproxy"><svg width="15" height="15"><use href="#i-shield"/></svg><span id="navTpLabel">透明代理</span></button>
+      <button class="nav-item" data-page="lanproxy"><svg width="15" height="15"><use href="#i-lan"/></svg><span>局域网代理</span></button>
+      <button class="nav-item" data-page="conns"><svg width="15" height="15"><use href="#i-list"/></svg><span>连接</span><i class="live-dot" id="connDot" style="display:none"></i></button>
+    </div>
+
+    <div class="side-foot">
+      <div class="device-card">
+        <div class="device-row"><span class="device-name" id="devName">本机</span><span class="badge lime" style="height:16px;font-size:9.5px" id="devArch">x86_64</span></div>
+        <div class="device-meta"><span id="devMem">面板 — MB</span></div>
+        <div class="mem-bar"><i id="devMemBar" style="width:0%"></i></div>
+      </div>
+      <button class="nav-item" data-page="settings"><svg width="15" height="15"><use href="#i-settings"/></svg><span>设置</span></button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="page-title-sm" id="crumbTitle">概览</div>
+      <div class="crumb" id="crumbPath">/ <b>控制台</b></div>
+      <div class="topbar-right">
+        <button class="btn ghost sm topbar-restart" id="topRestartBtn" data-action="restart" title="重启核心"><svg width="13" height="13"><use href="#i-refresh"/></svg><span>重启核心</span></button>
+        <span class="chip" id="topStatus"><i class="dot"></i> 检测中</span>
+        <span class="chip" id="topVersion" style="display:none"></span>
+        <button class="theme-toggle" id="themeToggle" title="切换深浅色" aria-label="切换深浅色">
+          <svg width="15" height="15"><use href="#i-moon" id="themeIcon"/></svg>
+        </button>
+        <button class="btn ghost sm" id="cmdkBtn" style="gap:8px"><svg width="13" height="13"><use href="#i-search"/></svg><span style="color:var(--text-4)">搜索</span><span class="kbd">⌘K</span></button>
+        <button class="icon-btn" title="退出登录" id="logoutBtn"><svg width="15" height="15"><use href="#i-logout"/></svg></button>
+        <div class="avatar">sb</div>
+      </div>
+    </header>
+
+    <div class="content" id="content">
+
+      <!-- ======================================================== DASHBOARD -->
+      <section class="page active" id="page-dashboard">
+        <div class="wrap">
+          <div class="page-head">
+            <div>
+              <h1>概览</h1>
+              <p id="dashDesc">正在读取核心状态…</p>
+            </div>
+            <div class="page-actions">
+              <button class="btn" id="refreshBtn"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新</button>
+              <button class="btn primary" data-goto="tproxy"><svg width="13" height="13"><use href="#i-shield"/></svg><span id="dashTpLabel">透明代理</span></button>
+            </div>
+          </div>
+
+          <div class="hero">
+            <div class="hero-main">
+              <div class="hero-body">
+                <div class="hero-left">
+                  <div class="hero-status">
+                    <span class="glyph" id="heroGlyph"><svg width="18" height="18"><use href="#i-zap"/></svg></span>
+                    <span id="heroStatus">检测中</span>
+                    <span class="badge mono lime" id="heroExitIp" style="display:none;margin-left:10px;height:22px"></span>
+                  </div>
+                  <div class="hero-sub">
+                    <span id="heroUptime">—</span><span class="sep"></span>
+                    <span id="heroPid">PID —</span><span class="sep"></span>
+                    <span id="heroCheck">—</span>
+                  </div>
+                  <div class="hero-meta">
+                    <div><div class="k">出站节点</div><div class="v" id="heroNodes">0</div></div>
+                    <div><div class="k">路由规则</div><div class="v" id="heroRules">0</div></div>
+                    <div><div class="k">Clash API</div><div class="v" id="heroApi">127.0.0.1:9091</div></div>
+                    <div><div class="k">入站</div><div class="v" id="heroIn">mixed :7890</div></div>
+                  </div>
+                </div>
+                <div class="flow">
+                  <div class="flow-hd">流量路径 · live</div>
+                  <div class="flow-step"><span class="k">ingress</span><span class="v" id="flowIn">mixed-in</span><span class="tag">127.0.0.1</span></div>
+                  <div class="flow-step"><span class="k">route</span><span class="v" id="flowRules">— rules</span><span class="tag">rule</span></div>
+                  <div class="flow-step"><span class="k">outbound</span><span class="v">proxy → auto</span><span class="tag">urltest</span></div>
+                  <div class="flow-step live"><span class="k">active</span><span class="v" id="flowNow" style="color:var(--lime)">—</span><span class="tag" id="flowNowMs" style="color:var(--lime)">—</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="stat-grid" style="margin-bottom:12px">
+            <div class="stat">
+              <div class="stat-label"><svg width="11" height="11"><use href="#i-activity"/></svg>活跃连接</div>
+              <div class="stat-value" id="statConns">0</div>
+              <div class="stat-foot" id="statConnsFoot">等待 WebSocket 数据</div>
+              <svg class="stat-spark" data-spark="a" viewBox="0 0 90 42"></svg>
+            </div>
+            <div class="stat">
+              <div class="stat-label"><svg width="11" height="11"><use href="#i-arrow-down"/></svg>下行速率</div>
+              <div class="stat-value" id="statDown">0<small>KB/s</small></div>
+              <div class="stat-foot" id="statUpFoot">上行 0 KB/s</div>
+              <svg class="stat-spark" data-spark="b" viewBox="0 0 90 42"></svg>
+            </div>
+            <div class="stat">
+              <div class="stat-label"><svg width="11" height="11"><use href="#i-globe"/></svg>可用节点</div>
+              <div class="stat-value" id="statNodes">0<small>/ 0</small></div>
+              <div class="stat-foot" id="statNodesFoot">—</div>
+              <svg class="stat-spark" data-spark="c" viewBox="0 0 90 42"></svg>
+            </div>
+            <div class="stat">
+              <div class="stat-label"><svg width="11" height="11"><use href="#i-zap"/></svg>路由规则</div>
+              <div class="stat-value" id="statRules">0</div>
+              <div class="stat-foot" id="statRulesFoot">final → proxy</div>
+              <svg class="stat-spark" data-spark="d" viewBox="0 0 90 42"></svg>
+            </div>
+          </div>
+
+          <div class="grid-2" style="margin-bottom:12px">
+            <div class="card">
+              <div class="card-hd">
+                <h3>流量趋势</h3><span class="sub">WebSocket · 2s 节流</span>
+                <div class="right">
+                  <div class="chart-legend"><span><i style="background:#c6ff4d"></i>下行</span><span><i style="background:#8f7dff"></i>上行</span></div>
+                </div>
+              </div>
+              <div class="card-bd chart-wrap" style="position:relative">
+                <svg class="chart-svg" id="trafficChart" viewBox="0 0 760 208" preserveAspectRatio="none"></svg>
+                <div class="chart-tip" id="chartTip"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-hd"><h3>节点延迟</h3><span class="sub">内存缓存 5 分钟</span><div class="right"><span class="badge mono">3 并发</span></div></div>
+              <div class="card-bd flush" id="dashNodes"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd">
+              <h3>最近日志</h3><span class="sub">尾部 400 行 · 不落盘</span>
+              <div class="right"><span class="badge">ring buffer</span><button class="btn ghost xs" data-goto="service">全部</button></div>
+            </div>
+            <div class="logbox" id="dashLog" style="border-radius:0 0 14px 14px;max-height:190px"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== SUBS -->
+      <section class="page" id="page-subs">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1>订阅</h1><p>拉取后只保留解析出的节点，原始响应不落盘。单文件元数据 &lt; 100 KB。</p></div>
+            <div class="page-actions">
+              <button class="btn" id="refreshAllBtn"><svg width="13" height="13"><use href="#i-refresh"/></svg>更新全部</button>
+              <button class="btn primary" id="addSubBtn"><svg width="13" height="13"><use href="#i-plus"/></svg>新增订阅</button>
+            </div>
+          </div>
+
+          <div class="summary">
+            <div><div class="k">订阅总数</div><div class="v" id="sumSubs">0 <small>条</small></div></div>
+            <div><div class="k">解析节点</div><div class="v" id="sumNodes">0 <small>个</small></div></div>
+            <div><div class="k">已用流量（合计）</div><div class="v" id="sumUsed">—</div></div>
+            <div><div class="k">自动更新</div><div class="v" id="sumAuto">—</div></div>
+          </div>
+
+          <div class="sub-grid" id="subGrid"></div>
+
+          <div class="callout" style="margin-top:14px">
+            <svg width="15" height="15"><use href="#i-info"/></svg>
+            <div><b>关于存储：</b>订阅地址保存在 <code>subs.json</code>（权限 0600），日志只输出掩码。原始 YAML / Base64 响应解析完即丢弃。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== NODES -->
+      <section class="page" id="page-nodes">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1>节点</h1><p>延迟通过 Clash API 获取，结果仅存内存并在 5 分钟后过期。</p></div>
+            <div class="page-actions">
+              <button class="btn" id="testAllBtn"><svg width="13" height="13"><use href="#i-zap"/></svg>全部测速</button>
+              <button class="btn primary" data-goto="config"><svg width="13" height="13"><use href="#i-code"/></svg>生成配置</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="toolbar">
+              <input class="input search" placeholder="搜索节点、协议或地址…" id="nodeSearch" />
+              <div class="seg" id="nodeGroups"><button class="on" data-group="all">全部</button></div>
+              <div class="spacer"></div>
+              <span class="chip"><svg width="12" height="12"><use href="#i-zap"/></svg><span id="workersChip">并发上限 3</span></span>
+              <span class="chip" id="stProgress">尚未测速</span>
+            </div>
+            <div style="max-height:calc(100vh - 300px);overflow:auto">
+              <table class="table" id="nodeTable">
+                <thead><tr><th>节点</th><th>协议</th><th>地址</th><th>延迟</th><th>启用</th><th class="t-right">操作</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="editor-foot" style="border-top:1px solid var(--line);justify-content:space-between">
+              <span id="nodeFoot">—</span>
+              <span>测速结果缓存 TTL <span id="delayTtlNote">300</span>s · 进程内 map，不写磁盘</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== CONFIG -->
+      <section class="page" id="page-config">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1>配置</h1><p>模板 + 节点片段渲染，写入前必过 <code id="cfgCheckCmd" style="font-family:var(--mono);font-size:11px;color:var(--text-2)">sing-box check</code>。保留最近 3 个快照。</p></div>
+            <div class="page-actions">
+              <button class="btn" id="renderBtn"><svg width="13" height="13"><use href="#i-layers"/></svg>重新渲染</button>
+              <button class="btn" id="validateBtn"><svg width="13" height="13"><use href="#i-check"/></svg>校验</button>
+              <button class="btn primary" id="applyBtn">保存并应用</button>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card" style="overflow:hidden">
+              <div class="tabs">
+                <button class="tab on" id="cfgTabName">原始 JSON</button>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:8px;padding:6px 4px">
+                  <span class="badge mono" id="cfgFileName">config.json</span>
+                  <span class="badge lime" id="dirtyBadge" style="display:none">未保存</span>
+                </div>
+              </div>
+              <div class="editor">
+                <div class="editor-scroll"><textarea id="cfgEditor" spellcheck="false" placeholder="点击「重新渲染」从模板 + 节点生成配置"></textarea></div>
+                <div class="editor-foot">
+                  <span>UTF-8</span><span>·</span><span id="cfgLang">JSON</span><span>·</span><span id="codeStat">行 —</span>
+                  <span style="margin-left:auto" id="codeSrc">—</span>
+                </div>
+              </div>
+              <div class="check-out" id="checkOut"><div class="dim" id="checkCmd">$ sing-box check -c config.json</div><div class="dim">尚未校验</div></div>
+            </div>
+
+            <div class="stack-12">
+              <div class="card">
+                <div class="card-hd"><h3>配置快照</h3><span class="sub">每次应用前自动备份 · 上限 <span id="snapLimit">3</span></span><div class="right"><span class="badge" id="snapCount">保留 0/3</span></div></div>
+                <div id="snapList"></div>
+                <div class="card-bd" style="border-top:1px solid var(--line);padding:11px 14px">
+                  <button class="btn danger block sm" id="rollbackBtn"><svg width="12" height="12"><use href="#i-undo"/></svg>回滚到上一个可用配置</button>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-hd"><h3>渲染来源</h3></div>
+                <div class="card-bd" style="display:flex;flex-direction:column;gap:10px">
+                  <div style="display:flex;align-items:center;gap:8px;font-size:11.5px"><span class="badge mono" id="tplFileName">template.json</span><span style="color:var(--text-3)" id="tplSkeleton">inbounds / dns / route 骨架</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;font-size:11.5px"><span class="badge mono">nodes-*.json</span><span style="color:var(--text-3)" id="srcNodes">—</span></div>
+                  <div class="callout" style="margin-top:2px"><svg width="14" height="14"><use href="#i-info"/></svg><div>后端不硬编码字段映射：模板由用户维护，面板只做 <b id="tplMergeNote">JSON 合并 + 占位符替换</b>。</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== SERVICE -->
+      <section class="page" id="page-service">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1>服务</h1><p>进程由面板直接管理。日志使用 400 行环形缓冲，仅内存。</p></div>
+            <div class="page-actions">
+              <button class="btn" data-action="restart"><svg width="12" height="12"><use href="#i-refresh"/></svg>重启</button>
+              <button class="btn danger" data-action="stop"><svg width="12" height="12"><use href="#i-stop"/></svg>停止</button>
+              <button class="btn primary" data-action="start"><svg width="12" height="12"><use href="#i-play"/></svg>启动</button>
+            </div>
+          </div>
+
+          <div class="grid-3" style="margin-bottom:12px">
+            <div class="card svc-card">
+              <div class="stat-label">进程状态</div>
+              <div style="display:flex;align-items:center;gap:8px;margin-top:9px">
+                <span class="dot" id="svcDot" style="color:var(--text-4);width:7px;height:7px"></span>
+                <span style="font-size:17px;font-weight:600;letter-spacing:-.02em" id="svcState">—</span>
+                <span class="badge mono" style="margin-left:auto" id="svcPid">PID —</span>
+              </div>
+              <div style="font-size:11px;color:var(--text-4);font-family:var(--mono)" id="svcUptime">—</div>
+            </div>
+            <div class="card svc-card">
+              <div class="stat-label">RSS 占用</div>
+              <div class="stat-value" style="margin-top:7px;font-size:20px" id="svcRss">—</div>
+              <div class="mini-bar" style="margin-top:9px;width:100%"><i id="svcMemBar" style="width:0%;background:linear-gradient(90deg,#52d9c4,#c6ff4d)"></i></div>
+              <div style="font-size:10.5px;color:var(--text-4)" id="svcMemNote">—</div>
+            </div>
+            <div class="card svc-card">
+              <div class="stat-label">配置版本</div>
+              <div style="display:flex;align-items:center;gap:8px;margin-top:9px">
+                <span style="font-size:17px;font-weight:600;letter-spacing:-.02em" id="svcCfgVer">v0</span>
+                <span class="badge" style="margin-left:auto" id="svcCheckBadge">未校验</span>
+              </div>
+              <div style="font-size:10.5px;color:var(--text-4)" id="svcCheckNote">—</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom:12px">
+            <div class="card-hd"><h3>开机自启</h3><span class="sub">重启电脑后面板 / 核心自动运行</span></div>
+            <div class="card-bd" style="display:flex;flex-direction:column">
+              <div style="display:flex;align-items:center;gap:10px;padding:2px 0 12px;border-bottom:1px solid var(--line)">
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12.5px;color:var(--text)">面板开机自启</div>
+                  <div style="font-size:10.5px;color:var(--text-4);margin-top:2px" id="asPanelNote">—</div>
+                </div>
+                <button class="switch" id="asPanelSwitch"></button>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;padding-top:12px">
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12.5px;color:var(--text)"><span id="asCoreLabel">sing-box</span> 开机自启</div>
+                  <div style="font-size:10.5px;color:var(--text-4);margin-top:2px" id="asCoreNote">面板启动时自动拉起内核；面板本身不自启时，开机后核心也不会运行</div>
+                </div>
+                <button class="switch" id="asCoreSwitch"></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd">
+              <h3>运行日志</h3><span class="sub">仅保留最近 400 行</span>
+              <div class="right"><span class="badge lime" id="logLive"><i class="dot live"></i> streaming</span>
+                <button class="btn ghost xs" id="copyLogBtn"><svg width="11" height="11"><use href="#i-copy"/></svg></button></div>
+            </div>
+            <div class="logbox tall" id="fullLog" style="border-radius:0 0 14px 14px"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ NETWORK（Linux=透明代理 / Windows=TUN 模式） -->
+      <section class="page" id="page-tproxy">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1 id="tpTitle">透明代理</h1><p id="tpDesc">nftables redirect 接管局域网 TCP 流量；客户端网关指向本机即可生效。</p></div>
+            <div class="page-actions"><button class="btn" id="tproxyRefresh"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div>
+          </div>
+          <div class="grid-2">
+            <div class="stack-12">
+              <div class="card">
+                <div class="card-hd"><h3>路由模式</h3><div class="right"><span class="badge lime" id="routeBadge">规则分流</span></div></div>
+                <div class="card-bd">
+                  <div class="seg-tabs" id="routeSeg">
+                    <button data-mode="rule" class="on">规则分流</button>
+                    <button data-mode="global">全局代理</button>
+                    <button data-mode="direct">全局直连</button>
+                  </div>
+                  <div id="routeDesc" style="font-size:11.5px;color:var(--text-3);line-height:1.7;margin-top:12px">国内域名 / IP 直连，其余流量走节点；推荐日常使用。</div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-hd"><h3>流量接管</h3><span class="sub" id="tpTakeoverSub">两个通道独立开关，可同时启用</span></div>
+                <div class="card-bd">
+                  <div style="display:flex;justify-content:space-between;font-size:11.5px;padding-bottom:12px;border-bottom:1px solid var(--line)">
+                    <span style="color:var(--text-3)">核心状态</span><span class="badge mono" id="tpCore">—</span>
+                  </div>
+
+                  <!-- redirect（仅 Linux）：接管局域网设备 -->
+                  <div id="redirectRow" style="padding-top:14px">
+                    <div style="display:flex;align-items:center;gap:10px">
+                      <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <b style="font-size:13px">nftables redirect</b>
+                          <span class="badge mono" id="tpMode">redirect</span>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-4);margin-top:3px">局域网设备的 TCP 经本机交给内核；客户端网关指向本机即可，无需安装任何东西</div>
+                      </div>
+                      <span class="badge amber" id="tproxyBadge">未启用</span>
+                      <button class="switch" id="tproxySwitch"></button>
+                    </div>
+                    <div id="tpRedirectGrid" style="display:none;margin-top:4px">
+                      <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
+                        <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">nftables 规则</span><span class="badge" id="tpRules">0 条</span></div>
+                        <div style="display:flex;justify-content:space-between;font-size:11.5px;gap:12px"><span style="color:var(--text-3);flex:none">接管网段</span><span class="badge mono" id="tpCidrs" style="white-space:normal;text-align:right">—</span></div>
+                        <div style="display:flex;align-items:center;gap:10px;margin-top:4px;padding-top:12px;border-top:1px solid var(--line)">
+                          <div style="flex:1;min-width:0">
+                            <div style="font-size:12.5px;color:var(--text)">同时接管本机流量</div>
+                            <div style="font-size:10.5px;color:var(--text-4);margin-top:2px">服务器自己发起的 TCP 也走代理；自动排除面板进程，避免回环</div>
+                          </div>
+                          <button class="switch" id="localSwitch"></button>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:10px;margin-top:4px;padding-top:12px;border-top:1px solid var(--line)">
+                          <div style="flex:1;min-width:0">
+                            <div style="font-size:12.5px;color:var(--text)">接管局域网 DNS</div>
+                            <div style="font-size:10.5px;color:var(--text-4);margin-top:2px">把 LAN 的 53 端口劫持给当前内核；客户端用 .1 的 DNS 也会被改写，本地域名可能失效</div>
+                          </div>
+                          <button class="switch" id="dnsSwitch"></button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div id="redirectDivider" style="height:1px;background:var(--line);margin:14px 0"></div>
+
+                  <!-- TUN：两个平台都有 -->
+                  <div id="tunRow">
+                    <div style="display:flex;align-items:center;gap:10px">
+                      <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <b style="font-size:13px">TUN 虚拟网卡</b>
+                          <span class="badge mono" id="tunDevName">singbox-tun</span>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-4);margin-top:3px">本机全部流量进入内核（含不走系统代理的程序）；需要 root / 管理员</div>
+                      </div>
+                      <span class="badge amber" id="tunBadge">未启用</span>
+                      <button class="switch" id="tunSwitch2"></button>
+                    </div>
+                    <div id="tpTunGrid" style="display:none;margin-top:10px;padding-top:12px;border-top:1px solid var(--line)">
+                      <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">接管范围</span><span class="badge">整机全部流量</span></div>
+                      <div style="display:flex;justify-content:space-between;font-size:11.5px;margin-top:10px"><span style="color:var(--text-3)">分流规则</span><span class="badge">跟随「路由模式」设置</span></div>
+                      <div style="display:flex;justify-content:space-between;font-size:11.5px;margin-top:10px"><span style="color:var(--text-3)">权限要求</span><span class="badge" id="tunAdmin">管理员身份运行</span></div>
+                    </div>
+                  </div>
+
+                  <div class="callout" style="margin-top:14px">
+                    <svg width="15" height="15"><use href="#i-info"/></svg>
+                    <div id="tpTakeoverNote">redirect 只接管 TCP，目标为内网的流量直接放行；两个通道可同时开启——本机流量走 TUN，局域网设备走 redirect。切换任意开关都会重新渲染配置并重启核心（约 1 秒），失败自动回滚。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack-12">
+              <div class="card" id="nftPreview">
+                <div class="card-hd"><h3>nftables 规则预览</h3><span class="sub" id="tpPreviewNote">启用后下发</span></div>
+                <div class="card-bd" style="padding:0">
+                  <details>
+                    <summary style="padding:12px 16px;cursor:pointer;font-size:12px;color:var(--text-3);user-select:none">展开规则内容</summary>
+                    <div class="rule-code" style="border-radius:0;max-height:460px;overflow:auto"><span class="cm">#!/usr/sbin/nft -f</span>
+<span class="kw">table</span> inet singbox {
+  <span class="kw">set</span> local_nets { <span class="kw">type</span> ipv4_addr; flags interval;
+    elements = { <span class="str">10.0.0.0/8</span>, <span class="str">172.16.0.0/12</span>, <span class="str">192.168.0.0/16</span> } }
+  <span class="kw">chain</span> prerouting {
+    <span class="kw">type</span> nat hook prerouting priority dstnat; policy accept;
+    <span class="cm"># 仅「接管局域网 DNS」开启时下发</span>
+    ip saddr @lan_nets udp dport <span class="str">53</span> <span class="kw">redirect to</span> :<span class="str">5354</span>
+    ip saddr @lan_nets tcp dport <span class="str">53</span> <span class="kw">redirect to</span> :<span class="str">5354</span>
+    ip daddr @local_nets <span class="kw">return</span>
+    ip saddr @lan_nets meta l4proto tcp <span class="kw">redirect to</span> :<span class="str">12345</span>
+  }
+  <span class="cm"># 仅「同时接管本机流量」开启时下发</span>
+  <span class="kw">chain</span> output {
+    <span class="kw">type</span> nat hook output priority dstnat; policy accept;
+    socket cgroupv2 level <span class="str">2</span> <span class="str">"system.slice/sing-box-panel.service"</span> <span class="kw">return</span>
+    ip daddr @local_nets <span class="kw">return</span>
+    meta l4proto tcp <span class="kw">redirect to</span> :<span class="str">12345</span>
+  }
+}</div>
+                  </details>
+                </div>
+              </div>
+
+              <div class="card" id="tpWinInfo" style="display:none">
+                <div class="card-hd"><h3>两种接管方式</h3></div>
+                <div class="card-bd" style="display:flex;flex-direction:column">
+                  <div style="display:flex;gap:10px">
+                    <span class="badge lime" style="flex:none;height:20px">TUN</span>
+                    <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">虚拟网卡三层接管，<b>所有程序</b>的流量都进当前内核（包括不遵循系统代理设置的）。</div>
+                  </div>
+                  <div style="display:flex;gap:10px;padding-top:12px;margin-top:12px;border-top:1px solid var(--line)">
+                    <span class="badge" style="flex:none;height:20px">系统代理</span>
+                    <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">只对遵循系统代理设置的程序生效，流量走 <code id="mixedHint">127.0.0.1:7890</code> mixed 入站；与 TUN 可共存。</div>
+                  </div>
+                  <div style="display:flex;gap:10px;padding-top:12px;margin-top:12px;border-top:1px solid var(--line)">
+                    <span class="badge amber" style="flex:none;height:20px">注意</span>
+                    <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">面板必须以<b>管理员身份</b>运行（子进程继承令牌才能创建 wintun 网卡）；关闭 TUN 后虚拟网卡即被移除。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== LAN PROXY -->
+      <section class="page" id="page-lanproxy">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1>局域网代理</h1><p>独立 SOCKS5 / HTTP 入站，供局域网内的手机、电视盒子、其他电脑手动指向本机；与透明代理互不影响，可单独开关。</p></div>
+            <div class="page-actions">
+              <span class="chip" id="lpChip"><i class="dot"></i> 未开启</span>
+              <button class="btn" id="lpRefresh"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="stack-12">
+              <div class="card">
+                <div class="card-hd"><h3>本机 mixed 入站</h3><span class="sub">系统代理入口 · 不支持鉴权</span><div class="right"><span class="badge mono" id="lpMixBadge">127.0.0.1:7890</span></div></div>
+                <div class="card-bd">
+                  <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">
+                    <div class="field" style="width:108px"><label>端口</label><input class="input" id="lpMixPort" type="number" min="1024" max="65535" /></div>
+                    <div class="field"><label>监听范围</label>
+                      <div class="seg" id="lpMixListenSeg">
+                        <button type="button" data-listen="127.0.0.1" class="on">仅本机</button>
+                        <button type="button" data-listen="0.0.0.0">局域网</button>
+                      </div>
+                    </div>
+                    <button class="btn primary sm" id="lpMixSave" style="margin-left:auto">应用</button>
+                  </div>
+                  <div class="callout warn" id="lpMixOpenWarn" style="display:none;margin-top:12px"><svg width="14" height="14"><use href="#i-alert"/></svg><div>mixed <b>不支持用户名密码</b>：监听 0.0.0.0 等于把无鉴权代理暴露给整个局域网。要给局域网设备用，请用下面的 SOCKS5 / HTTP 入站。</div></div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-hd"><h3>局域网代理</h3><span class="sub">SOCKS5 / HTTP · 可选鉴权</span><div class="right"><span class="badge" id="lpBadge">未开启</span><button class="switch" id="lpSwitch" title="开启 / 关闭局域网代理"></button></div></div>
+                <div class="card-bd" style="display:flex;flex-direction:column;gap:12px">
+                  <div style="display:grid;grid-template-columns:96px 96px minmax(0,1fr) minmax(0,1fr);gap:10px;align-items:end">
+                    <div class="field"><label>SOCKS5</label><input class="input" id="lpSocks" type="number" min="1024" max="65535" /></div>
+                    <div class="field"><label>HTTP</label><input class="input" id="lpHttp" type="number" min="1024" max="65535" /></div>
+                    <div class="field"><label>用户名</label><input class="input" id="lpUser" placeholder="留空 = 不鉴权" /></div>
+                    <div class="field">
+                      <label style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+                        <span>密码</span>
+                        <button class="btn ghost xs" id="lpGen" type="button" style="height:16px;padding:0 4px;font-size:10px">随机</button>
+                      </label>
+                      <input class="input" id="lpPass" placeholder="留空 = 不鉴权" />
+                    </div>
+                  </div>
+                  <div class="callout warn" id="lpOpenWarn" style="display:none"><svg width="14" height="14"><use href="#i-alert"/></svg><div>当前为<strong>开放代理（无鉴权）</strong>：任何能连到本机 <span id="lpOpenPorts"></span> 端口的设备都可免密借用，请确认网络环境可信。</div></div>
+                  <div style="display:flex;align-items:center;gap:12px">
+                    <div style="font-size:10.5px;color:var(--text-4);line-height:1.6;flex:1;min-width:0">
+                      用户名与密码<b>都填</b>才鉴权；<b>都留空</b>＝无鉴权开放代理；只填一个会报错。
+                    </div>
+                    <button class="btn primary sm" id="lpSave">保存并应用</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="stack-12">
+              <div class="card">
+                <div class="card-hd"><h3>当前状态</h3><div class="right"><span class="badge" id="lpStatRun">未开启</span></div></div>
+                <div class="card-bd" style="display:flex;flex-direction:column;gap:9px">
+                  <div style="display:flex;justify-content:space-between;font-size:11.5px;gap:12px"><span style="color:var(--text-3)">SOCKS5</span><span class="badge mono" id="lpStatSocks">—</span></div>
+                  <div style="display:flex;justify-content:space-between;font-size:11.5px;gap:12px"><span style="color:var(--text-3)">HTTP</span><span class="badge mono" id="lpStatHttp">—</span></div>
+                  <div style="display:flex;justify-content:space-between;font-size:11.5px;gap:12px"><span style="color:var(--text-3)">鉴权</span><span class="badge" id="lpStatAuth">—</span></div>
+                  <div style="display:flex;justify-content:space-between;font-size:11.5px;gap:12px"><span style="color:var(--text-3)">出口</span><span class="badge lime" id="lpStatRoute">跟随路由模式</span></div>
+                  <div style="font-size:10.5px;color:var(--text-4);line-height:1.6" id="lpStatNote">未开启时，sing-box 配置里不会有这两个入站。</div>
+                  <div class="callout" id="lpHint" style="display:none;margin-top:2px"><svg width="14" height="14"><use href="#i-info"/></svg><div id="lpLinks" style="font-family:var(--mono);font-size:10.5px;line-height:1.7;word-break:break-all"></div></div>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card-hd"><h3>客户端怎么填</h3><span class="sub">手动指定，无需改网关</span></div>
+                <div class="card-bd" style="display:flex;flex-direction:column;gap:10px">
+                  <div style="display:flex;gap:8px;align-items:flex-start">
+                    <span class="badge lime" style="flex:none;height:18px">SOCKS5</span>
+                    <div style="font-size:11.5px;line-height:1.55;color:var(--text-2)">本机局域网 IP + SOCKS5 端口；支持 UDP 的客户端（Telegram 等）可直接用。</div>
+                  </div>
+                  <div style="display:flex;gap:8px;align-items:flex-start">
+                    <span class="badge" style="flex:none;height:18px">HTTP</span>
+                    <div style="font-size:11.5px;line-height:1.55;color:var(--text-2)">浏览器或系统代理填 HTTP 端口，与 SOCKS5 共用同一出站和分流规则。</div>
+                  </div>
+                  <div style="display:flex;gap:8px;align-items:flex-start">
+                    <span class="badge amber" style="flex:none;height:18px">注意</span>
+                    <div style="font-size:11.5px;line-height:1.55;color:var(--text-2)">两个端口都监听 0.0.0.0，无鉴权时同网段设备可免密借用。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== CONNECTIONS -->
+      <section class="page" id="page-conns">
+        <div class="wrap">
+          <div class="page-head">
+            <div><h1>连接</h1><p>由 Clash API WebSocket 实时推送，不落盘。前端最多渲染 200 条。</p></div>
+            <div class="page-actions">
+              <span class="chip" id="connLive"><i class="dot"></i> 连接中</span>
+              <button class="btn" id="pauseBtn">暂停</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="toolbar">
+              <input class="input search" placeholder="按主机或规则过滤…" id="connSearch" />
+              <div class="spacer"></div>
+              <span class="chip mono" id="connUp">↑ 0 B/s</span>
+              <span class="chip mono" id="connDown">↓ 0 B/s</span>
+              <span class="chip" id="connCount">0 / 200</span>
+            </div>
+            <div style="max-height:calc(100vh - 300px);overflow:auto">
+              <table class="table" id="connTable">
+                <thead><tr><th>主机</th><th>目标</th><th>出站 / 规则</th><th>网络</th><th class="t-right">上行</th><th class="t-right">下行</th><th>时长</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="editor-foot" style="border-top:1px solid var(--line);justify-content:space-between">
+              <span>WebSocket /connections · 2s 节流</span>
+              <span>客户端环形缓冲 200 条 · 断线退避 1s → 30s</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== SETTINGS -->
+      <section class="page" id="page-settings">
+        <div class="wrap">
+          <div class="page-head"><div><h1>设置</h1><p>面板配置由启动参数、panel.conf 与 settings.json 决定。</p></div></div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-hd"><h3>访问控制</h3><span class="sub">面板登录与免密码访问</span></div>
+            <div class="card-bd" style="display:flex;flex-direction:column;gap:12px">
+              <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">登录状态</span><span class="badge" id="setAuthState">—</span></div>
+              <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">登录账户</span><span class="badge mono" id="setAuthUser">—</span></div>
+              <div style="display:flex;align-items:center;gap:10px;border-top:1px solid var(--line);padding-top:12px">
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12.5px;color:var(--text)">允许免密码访问</div>
+                  <div style="font-size:10.5px;color:var(--text-4);margin-top:2px">开启后打开面板地址直接进入首页；任何能访问该端口的人都可以修改面板设置</div>
+                </div>
+                <button class="switch" id="authSwitch"></button>
+              </div>
+              <div class="callout warn" id="authWarn" style="display:none">
+                <svg width="15" height="15"><use href="#i-alert"/></svg>
+                <div>当前<b>未启用登录</b>：<code id="authListen">—</code> 上的任何访问者都能直接操作面板。建议仅监听 127.0.0.1 或部署在可信内网。</div>
+              </div>
+            </div>
+          </div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-hd"><h3>内核</h3><span class="sub">切换会重新渲染配置并重启核心</span><div class="right"><span class="badge lime" id="engineBadge">—</span></div></div>
+            <div class="card-bd">
+              <div class="seg-tabs" id="engineSeg">
+                <button data-engine="sing-box">sing-box</button>
+                <button data-engine="mihomo">mihomo</button>
+              </div>
+              <div id="engineNote" style="font-size:11.5px;color:var(--text-3);line-height:1.7;margin-top:12px">正在读取内核状态…</div>
+              <div id="engineDetail" style="display:flex;flex-direction:column;gap:6px;margin-top:10px"></div>
+            </div>
+          </div>
+          <div class="grid-2b">
+            <div class="card">
+              <div class="card-hd"><h3>运行参数</h3></div>
+              <div class="card-bd" style="display:flex;flex-direction:column;gap:12px">
+                <div style="display:flex;align-items:center;gap:8px;font-size:11.5px">
+                  <span style="color:var(--text-3);white-space:nowrap">监听地址</span>
+                  <input class="input" id="setListenInput" placeholder="127.0.0.1:9090" style="flex:1;min-width:0;height:30px;font-family:var(--mono);font-size:12px" />
+                  <button class="btn ghost sm" id="setListenSave">保存</button>
+                </div>
+                <div style="font-size:10.5px;color:var(--text-4)" id="setListenNote">修改后立即切换监听并写入 panel.conf</div>
+                <div style="display:flex;justify-content:space-between;gap:12px;font-size:11.5px"><span style="color:var(--text-3);white-space:nowrap;flex:none">数据目录</span><span class="badge mono" id="setDataDir" style="display:inline-block;max-width:72%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</span></div>
+                <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">快照保留</span><span class="badge mono" id="setKeep">3</span></div>
+                <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">测速并发</span><span class="badge mono" id="setWorkers">3</span></div>
+                <div class="callout warn" id="listenWarn" style="display:none"><svg width="15" height="15"><use href="#i-alert"/></svg><div>当前监听 <code id="setListen2">0.0.0.0</code>，局域网可直接访问。生产环境建议改回 <code>127.0.0.1</code> 并使用反向代理。</div></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-hd"><h3>关于</h3></div>
+              <div class="card-bd" style="display:flex;flex-direction:column;gap:12px">
+                <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">面板版本</span><span class="badge mono" id="setPanelVer">—</span></div>
+                <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)" id="setEngineLabel">sing-box</span><span class="badge mono" id="setSbVer">—</span></div>
+                <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">运行平台</span><span class="badge mono" id="setPlatform">—</span></div>
+                <div style="display:flex;justify-content:space-between;font-size:11.5px"><span style="color:var(--text-3)">存储</span><span class="badge mono" id="setStoreFmt">JSON + rename</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="paletteOverlay">
+  <div class="palette">
+    <div class="palette-input"><svg width="15" height="15"><use href="#i-search"/></svg><input id="paletteInput" placeholder="搜索页面或执行命令…" /></div>
+    <div class="palette-list" id="paletteList"></div>
+    <div class="editor-foot" style="border-top:1px solid var(--line);background:#0a0c0f;justify-content:space-between"><span>↑↓ 选择 · ↵ 打开 · esc 关闭</span><span id="paletteVer">sing-box panel</span></div>
+  </div>
+</div>
+
+<div class="overlay" id="dialogOverlay"><div class="dialog" id="dialog"></div></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

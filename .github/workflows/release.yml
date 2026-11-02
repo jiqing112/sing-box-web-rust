@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: linux-amd64
+            kernel_arch: linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact: linux-arm64
+            kernel_arch: linux-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: windows-amd64
+            kernel_arch: windows-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild + zig
+        if: runner.os == 'Linux'
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+            BIN="target/${{ matrix.target }}/release/sing-box-web"
+          else
+            cargo build --release --target ${{ matrix.target }}
+            BIN="target/${{ matrix.target }}/release/sing-box-web.exe"
+          fi
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Download kernels
+        shell: bash
+        run: |
+          # 与发布版本固定配对的内核；升级内核改这两行即可
+          SB_VER=1.14.3
+          MH_VER=1.19.33
+          mkdir -p pkg
+          if [ "${{ matrix.kernel_arch }}" = "windows-amd64" ]; then
+            curl -sL -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-windows-amd64.zip"
+            unzip -j sb.zip "*/sing-box.exe" -d pkg
+            mv pkg/sing-box.exe pkg/sing-box.exe
+            curl -sL -o pkg/mihomo.exe.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.gz"
+            gunzip -f pkg/mihomo.exe.gz
+          else
+            curl -sL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-${{ matrix.kernel_arch }}.tar.gz"
+            tar -xzf sb.tgz
+            cp sing-box-${SB_VER}-${{ matrix.kernel_arch }}/sing-box pkg/
+            curl -sL -o pkg/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-${{ matrix.kernel_arch }}-v${MH_VER}.gz"
+            gunzip -f pkg/mihomo.gz
+          fi
+          echo "SB_VER=$SB_VER" >> "$GITHUB_ENV"
+          echo "MH_VER=$MH_VER" >> "$GITHUB_ENV"
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="sing-box-web-rust-${VERSION}-${{ matrix.artifact }}"
+          mkdir -p "dist/$NAME"
+          cp "$BIN" "dist/$NAME/panel${{ runner.os == 'Windows' && '.exe' || '' }}"
+          cp pkg/sing-box* "dist/$NAME/"
+          [ -f pkg/mihomo ] && cp pkg/mihomo "dist/$NAME/" || true
+          [ -f pkg/mihomo.exe ] && cp pkg/mihomo.exe "dist/$NAME/" || true
+          cp -r deploy/* "dist/$NAME/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${NAME}.zip" "$NAME"
+          else
+            chmod +x "$NAME/panel" "$NAME/sing-box" "$NAME/mihomo" 2>/dev/null || true
+            tar -czf "${NAME}.tar.gz" "$NAME"
+          fi
+          cd ..
+          FILE=$(ls dist/${NAME}.tar.gz dist/${NAME}.zip 2>/dev/null | head -1)
+          sha256sum "$FILE" > "${FILE}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.artifact }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
