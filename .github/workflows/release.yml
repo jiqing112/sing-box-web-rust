@@ -49,7 +49,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.mipsel == true && 'nightly-2026-11-01' || 'stable' }}
-          targets: ${{ matrix.mipsel == true && '' || matrix.target }}
+          targets: ${{ matrix.mipsel != true && matrix.target || '' }}
           components: ${{ matrix.mipsel == true && 'rust-src' || '' }}
 
       - name: Install cargo-zigbuild + zig
@@ -100,8 +100,10 @@ jobs:
           if [ "$KA" = "windows-amd64" ]; then
             curl -fsSL -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-windows-amd64.zip"
             unzip -j sb.zip "*/sing-box.exe" -d pkg
-            curl -fsSL -o pkg/mihomo.exe.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.gz"
-            gunzip -f pkg/mihomo.exe.gz
+            # mihomo 的 Windows 资产是 zip（exe 名带版本号）
+            curl -fsSL -o mihomo.zip "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.zip"
+            unzip -jo mihomo.zip "mihomo-*.exe" -d pkg
+            mv pkg/mihomo-windows-amd64-v${MH_VER}.exe pkg/mihomo.exe
           elif [ "$KA" = "mipsle-softfloat" ]; then
             curl -fsSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-mipsle-softfloat.tar.gz"
             tar -xzf sb.tgz
@@ -119,14 +121,14 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          set -e
+          set -ex
           VERSION="${GITHUB_REF_NAME#v}"
           NAME="sing-box-web-rust-${VERSION}-${{ matrix.artifact }}"
           mkdir -p "dist/$NAME"
           cp "$BIN" "dist/$NAME/panel${{ runner.os == 'Windows' && '.exe' || '' }}"
           cp pkg/sing-box* "dist/$NAME/" 2>/dev/null || true
-          [ -f pkg/mihomo ] && cp pkg/mihomo "dist/$NAME/" || true
-          [ -f pkg/mihomo.exe ] && cp pkg/mihomo.exe "dist/$NAME/" || true
+          if [ -f pkg/mihomo ]; then cp pkg/mihomo "dist/$NAME/"; fi
+          if [ -f pkg/mihomo.exe ]; then cp pkg/mihomo.exe "dist/$NAME/"; fi
           cp -r deploy/* "dist/$NAME/"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -136,7 +138,15 @@ jobs:
             tar -czf "${NAME}.tar.gz" "$NAME"
           fi
           cd ..
-          FILE=$(ls dist/${NAME}.tar.gz dist/${NAME}.zip 2>/dev/null | head -1)
+          if [ -f "dist/${NAME}.tar.gz" ]; then
+            FILE="dist/${NAME}.tar.gz"
+          elif [ -f "dist/${NAME}.zip" ]; then
+            FILE="dist/${NAME}.zip"
+          else
+            echo "package not produced" >&2
+            ls -la dist >&2
+            exit 2
+          fi
           sha256sum "$FILE" > "${FILE}.sha256"
 
       - name: Upload artifacts
