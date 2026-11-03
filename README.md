@@ -124,96 +124,253 @@ cargo test            # 订阅解析 / 双内核渲染 / 引擎差异 / inspect 
 
 ## 部署指南
 
-### 前置：确认架构与包名
+> 以下所有流程均在真实环境验证过：Debian 13 虚拟机（amd64）、Debian 小主机（x86_64，
+> 迁移 Go 版数据）、Debian 13 + qemu-mipsel（模拟 MT7621 运行 mipsle 产物）。
+> 命令可直接复制执行，版本号 `1.0.1` 换成 Release 页最新即可。
 
-在目标机上执行 `uname -m` 对号入座：`x86_64` → linux-amd64 包；`aarch64` → linux-arm64 包；
-`mipsel` → linux-mipsle 包（MT7621 等软浮点 MIPS）。
+### 第 0 步：选对包
 
-### 1. Debian / Ubuntu 服务器（amd64 / arm64）
+在目标机执行 `uname -m` 对号入座：
+
+| `uname -m` 输出 | 下载包 | 典型设备 |
+| --- | --- | --- |
+| `x86_64` | `*-linux-amd64.tar.gz` | x86 服务器 / NAS / 软路由 |
+| `aarch64` | `*-linux-arm64.tar.gz` | MT7981（红米 AX3000、CR880x 等）、ARM 盒子 |
+| `mipsel` | `*-linux-mipsle.tar.gz` | MT7621（Cudy AC1200、小米 mini 等 MIPS 老路由） |
+| （Windows） | `*-windows-amd64.zip` | Windows 10/11 x64 |
+
+**端口占用总表**（后面反复用到，先记住）：
+
+| 端口 | 用途 | 默认监听范围 |
+| --- | --- | --- |
+| 9090 | 面板 Web | `127.0.0.1`（conf 可改 `0.0.0.0`） |
+| 9091 | Clash API（面板内部读状态/测速） | 仅 `127.0.0.1` |
+| 7890 | mixed 入站（系统代理） | 仅 `127.0.0.1` |
+| 12345 | 透明代理 redirect 入站 | `0.0.0.0` |
+| 5354 | 局域网 DNS 劫持入站 | `0.0.0.0` |
+| 1080 / 8118 | 局域网 SOCKS5 / HTTP 代理 | `0.0.0.0`（开关开启时） |
+| 53 | DNS 入站（sing-box 模板自带） | 仅 `127.0.0.1` |
+
+### 场景 A：Debian / Ubuntu 服务器（amd64 / arm64）
+
+#### A1. 下载与校验
 
 ```bash
-# 下载并解压（版本号换成 Release 页最新）
-curl -fsSL -o panel.tgz https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.0.1/sing-box-web-rust-1.0.1-linux-amd64.tar.gz
-tar -xzf panel.tgz && cd sing-box-web-rust-*-linux-amd64
+# 在 Release 页找到最新版本，或直接用命令下载（版本号自行替换）
+curl -fsSL -o /tmp/panel.tgz \
+  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.0.1/sing-box-web-rust-1.0.1-linux-amd64.tar.gz
 
-sudo ./install.sh     # 装到 /opt/sing-box-panel，systemd 启动并设开机自启
+# 校验完整性（可选但建议）
+curl -fsSL -o /tmp/panel.tgz.sha256 \
+  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.0.1/sing-box-web-rust-1.0.1-linux-amd64.tar.gz.sha256
+cd /tmp && sha256sum -c panel.tgz.sha256
+# 预期输出: sing-box-web-rust-1.0.1-linux-amd64.tar.gz: OK
+
+tar -xzf /tmp/panel.tgz -C /tmp && cd /tmp/sing-box-web-rust-1.0.1-linux-amd64
+ls
+# 预期: install.sh  mihomo  panel  panel.conf  README-linux.txt
+#       README-windows.txt  sing-box  sing-box-panel.service  start.bat
 ```
 
-- 安装完访问 `http://<本机IP>:9090`；初始密码打印在安装脚本末尾，
-  或在 `data/initial-password` 文件里（登录后请在「设置 → 访问控制」改掉并删除该文件）。
-- `install.sh` 只在缺失时安装 `panel.conf`（监听地址 / 账户密码可持久化，见包内注释）。
-- 常用命令：
+包内 `panel` 是面板本体（前端已内嵌，无任何外部依赖），`sing-box` / `mihomo` 是两个官方内核。
 
-  ```bash
-  systemctl status sing-box-panel     # 面板服务状态
-  systemctl restart sing-box-panel    # 重启面板（连带重启当前内核）
-  journalctl -u sing-box-panel -f     # 面板日志；内核日志在面板「服务」页看
-  ```
-
-- **升级**：停服务 → 用新 `panel` 覆盖 `/opt/sing-box-panel/bin/panel` → 起服务。
-  数据目录不动，配置与订阅全保留；systemd unit 与 Go 版同路径同服务名，原地升级不用改 unit。
-- 防火墙记得放行 9090（面板）；用「局域网代理 / 透明代理」再按需放行 1080/8118。
-
-### 2. OpenWrt 路由器（MT7981 / AX3000 系，arm64）
-
-内核与面板都是静态 musl 二进制，OpenWrt 直接跑，不装任何依赖包：
+#### A2. 安装
 
 ```bash
-# 在电脑上把包传上路由器（Router_IP 换成路由器地址）
+sudo ./install.sh
+```
+
+脚本做的事（每步都有输出）：
+
+1. 停掉已在运行的旧 `sing-box-panel` 服务（如有）；
+2. `panel` → `/opt/sing-box-panel/bin/panel`，数据目录 `/opt/sing-box-panel/data`；
+3. `sing-box` → `/usr/local/bin/sing-box`，`mihomo` → `/usr/local/bin/mihomo`；
+4. `panel.conf` 只在缺失时安装（**不会覆盖**你改过的配置）；
+5. 写入并启用 systemd 服务 `sing-box-panel`（开机自启）；
+6. 打印面板地址和初始密码。
+
+#### A3. 首次登录
+
+- 浏览器打开 `http://<本机IP>:9090`，用户名 `admin`。
+- 密码从哪来（优先级从高到低）：
+  1. `panel.conf` 里写了 `password=xxx` → 用它；
+  2. 启动参数 `-password xxx` 或环境变量 `PANEL_PASSWORD` → 用它；
+  3. 都没给 → 自动生成随机密码，**安装输出里直接打印**，同时落在
+     `/opt/sing-box-panel/data/initial-password`。
+- 登录后请到「设置 → 访问控制」改掉密码，然后删掉 `initial-password` 文件。
+- 忘记密码：编辑 `/opt/sing-box-panel/bin/panel.conf`，填上 `username=admin` 和
+  新 `password=xxx`，`systemctl restart sing-box-panel` 即完成重置。
+
+#### A4. 第一次上手（面板操作顺序）
+
+1. **订阅页** → 添加订阅：粘贴机场订阅链接，自动识别 Clash YAML / Base64 URI / sing-box JSON；
+   卡片上会显示流量用量与到期时间（机场响应头里有就显示）。
+2. **节点页** → 点测速：延迟写入内存缓存（默认 5 分钟 TTL）；不用的节点把开关关掉。
+3. **配置页** → 校验 → 应用：应用面板按「模板 + 启用节点」渲染配置，
+   `sing-box check` 通过才会落盘重启；失败自动回滚上一份配置。
+4. **透明代理页 / 局域网代理页**：按需开启（详见场景 B6 / A9）。
+5. **概览页**「运行中」旁的绿色徽标是当前出口 IP，可用来确认流量真的走了节点。
+
+#### A5. 日常运维
+
+```bash
+systemctl status sing-box-panel        # 面板服务状态（内核是面板子进程）
+systemctl restart sing-box-panel       # 重启面板（连带重启内核）
+journalctl -u sing-box-panel -f        # 面板自身日志
+ss -tlnp | grep -E '9090|9091|7890'    # 端口确认
+```
+
+内核运行日志在面板「服务」页（尾部 400 行环形缓冲，不落盘）；连接与流量在「连接」页实时看。
+
+#### A6. 升级版本
+
+```bash
+systemctl stop sing-box-panel
+sudo install -m 755 新目录/panel /opt/sing-box-panel/bin/panel
+systemctl start sing-box-panel
+```
+
+数据目录不动，订阅 / 节点 / 设置 / 快照全保留。systemd 单元与 Go 版同路径同服务名，
+从 Go 版原地升级不用改 unit。
+
+#### A7. 卸载
+
+```bash
+sudo systemctl disable --now sing-box-panel
+sudo rm -f /etc/systemd/system/sing-box-panel.service /usr/local/bin/sing-box /usr/local/bin/mihomo
+sudo rm -rf /opt/sing-box-panel
+```
+
+#### A8. 透明代理（本机 + 局域网 TCP 接管）
+
+面板「透明代理」页打开总开关即可，nftables `inet singbox` 表由面板自动下发与撤除：
+
+- 「接管网段」默认自动探测本机所在 RFC1918 网段，可手填（如 `192.168.1.0/24`）；
+- 「同时接管本机流量」= output 链也重定向（服务器自己发的请求也走代理，自动排除面板进程）；
+- 「接管局域网 DNS」= 53 端口重定向到内核 DNS（5354），客户端解析不再被污染；
+- 目标为内网的流量永远直连；redirect 只接管 TCP，QUIC 自动回落 TCP。
+
+客户端（局域网设备）什么都不用装：**网关和 DNS 都指向本机 IP** 即生效。
+
+#### A9. 故障排查速查表
+
+| 症状 | 原因与处理 |
+| --- | --- |
+| 启动报 `listen ...: Address in use` | 9090 被占：`ss -tlnp | grep 9090` 找到占用者，或改 panel.conf 的 listen |
+| 面板开了但核心起不来 | 「服务」页看内核日志；常见是 `sing-box` 路径不对（面板设置→内核里能看到探测结果） |
+| 应用配置返回 422 | 内核 check 不过，报错原文会透出（如节点字段缺失）；先在节点页关掉可疑节点再应用 |
+| 改完配置不生效 | 配置只在「应用」时生效；删订阅后也需要重新应用一次 |
+| 订阅拉取报 403 | 机场按 UA 拦截：面板固定用 `clash-verge/v1.7.7` UA，一般不会；换个网络确认机场本身可达 |
+| 订阅刷新显示成功但节点没变 | 机场返回 204（内容未变化/限流），面板按「未变化」处理属正常行为 |
+| 测速全是 -1 | 所有节点超时（6 秒/个）：先确认概览页出口 IP 徽标；或机场节点本身不可用 |
+| **整网断网了** | 核心没跑但 redirect 规则还在（异常掉电等）：`nft delete table inet singbox` 立即恢复直连；正常关闭面板会自动撤表 |
+| 面板密码忘了 | 见 A3「忘记密码」 |
+
+### 场景 B：OpenWrt 路由器（MT7981 / AX3000 / CR880x 等，arm64）
+
+#### B1. 前置检查
+
+```bash
+uname -m                      # 必须是 aarch64
+df -h / /overlay              # 看可用空间；panel 8.2MB + 内核（见 B2 空间方案）
+opkg print-architecture      # 确认包管理正常（仅装 kmod-tun 时才需要 opkg）
+```
+
+面板与内核都是静态 musl 二进制，**不需要装任何依赖包**；只有 TUN 模式需要 `kmod-tun`。
+
+#### B2. 下载解压
+
+空间够（≥35MB 可写）就直接放路由器；不够就放 U 盘（挂载点下文以 `/mnt/usb` 为例）：
+
+```bash
+# 电脑上执行，Router_IP 换成路由器 LAN IP
 scp sing-box-web-rust-*-linux-arm64.tar.gz root@Router_IP:/tmp
-ssh root@Router_IP
-mkdir -p /opt/sing-box-panel && tar -xzf /tmp/sing-box-web-rust-*-linux-arm64.tar.gz -C /opt/sing-box-panel --strip-components=1
-cd /opt/sing-box-panel && ./panel -data /opt/sing-box-panel/data -listen 0.0.0.0:9090 -password 你的密码
+
+# 路由器上执行
+mkdir -p /opt/sing-box-panel
+tar -xzf /tmp/sing-box-web-rust-*-linux-arm64.tar.gz -C /opt/sing-box-panel --strip-components=1
+cd /opt/sing-box-panel && ls
+# panel  sing-box  mihomo  install.sh  panel.conf  sing-box-panel.service ...
 ```
 
-- 浏览器打开 `http://Router_IP:9090`，添加订阅 → 应用配置。
-- **开机自启**：面板「设置 → 开机自启」打开开关即可——OpenWrt 上检测到 procd 会自动生成
-  `/etc/init.d/sing-box-panel` 并 enable（崩溃由 procd respawn 拉起），无需手写 init 脚本。
-- **透明代理（推荐 redirect 模式）**：面板「透明代理」页打开开关即可，
-  nftables redirect 不需要任何 kmod；局域网设备把网关和 DNS 指到路由器就自动被接管。
-  「同时接管本机流量」和「接管局域网 DNS」按需开。
-- **TUN 模式**需要先装 `kmod-tun`（`opkg update && opkg install kmod-tun`），面板以 root 运行即可开。
-- 若用 firewall4/fw4，面板的 nft 表（`inet singbox`）独立管理，互不干扰；关闭开关会自动撤表防断网。
+> 16MB flash 机型：内核放不进 flash，改解压到 U 盘
+> `mkdir -p /mnt/usb/singbox && tar -xzf ... -C /mnt/usb/singbox --strip-components=1`，
+> 并确保 U 盘在开机阶段自动挂载（块设备挂载点 / extroot）。
 
-### 3. MIPS 小路由（Cudy AC1200 / MT7621，16MB flash）
-
-用 `*-linux-mipsle.tar.gz`（软浮点，qemu-mipsel 已实测：登录 / 真实订阅 TLS 拉取 / 渲染 /
-双内核切换 / 经内核真实出网全部通过）：
+#### B3. 首次启动（先手动跑通，再上自启）
 
 ```bash
-scp sing-box-web-rust-*-linux-mipsle.tar.gz root@Router_IP:/tmp
-ssh root@Router_IP
+cd /opt/sing-box-panel
+./panel -data /opt/sing-box-panel/data -listen 0.0.0.0:9090 -password 你的密码
+# 保持这个 SSH 会话不关，浏览器打开 http://Router_IP:9090 按 A4 流程配置；
+# 配置应用成功、概览页显示「运行中」后，Ctrl+C 停掉，进入 B4。
 ```
 
-**flash 空间是这类机器的主要约束**（16MB flash 刨掉系统后通常只剩 1–2MB 可写）：
+#### B4. 开机自启（procd）
 
-- 面板（~8.5MB）+ 双内核（sing-box ~20MB / mihomo ~15MB）**整体放外置存储**——
-  U 盘 / TF 卡挂到 `/mnt`（或 extroot），再把包解到那里：
+面板里「设置 → 开机自启 → 面板」打开开关：检测到 OpenWrt（无 systemd）会自动生成
+`/etc/init.d/sing-box-panel`（START=99，崩溃由 procd `respawn` 自动拉起）并 enable。
+生成后可 `ls -l /etc/rc.d/S99sing-box-panel` 确认；改过安装路径就在面板里把开关关一次再开一次。
 
-  ```bash
-  mkdir -p /mnt/singbox && tar -xzf /tmp/sing-box-web-rust-*-linux-mipsle.tar.gz -C /mnt/singbox --strip-components=1
-  cd /mnt/singbox && ./panel -data /mnt/singbox/data -listen 0.0.0.0:9090 -password 你的密码
-  ```
+#### B5. 透明代理与客户端指向
 
-- 自启：面板里开「开机自启」生成 `/etc/init.d/sing-box-panel`（确保外置存储在开机阶段已挂载，
-  即 procd 的 START=99 时 U 盘已就绪；extroot 天然满足）。
-- 内存 128MB 足够：面板 ~8MB + 内核真实占用 ~25MB（其余 RSS 是内核可回收的代码页）。
-- MT7621 是软浮点 CPU，务必用 softfloat 内核（包里已配好，不用自己挑）。
+面板「透明代理」页打开开关（接管网段会自动探测，多网段路由器按需手填）。
+局域网设备**网关与 DNS 都指向路由器 LAN IP** 即被接管；路由器自己发出的流量默认不走代理。
 
-### 4. Windows
+#### B6. TUN 模式（可选）
 
-解压 `*-windows-amd64.zip` 后运行包内 `start.bat`（默认监听 127.0.0.1:9090，
-可用 `panel.conf` 或命令行改）。**TUN 模式需要以管理员身份运行**（右键“以管理员身份运行”再启 start.bat）。
-开机自启在面板里开开关，自动注册 SYSTEM 计划任务（`sing-box-panel`）。
+```bash
+opkg update && opkg install kmod-tun
+```
 
-### 5. 首次登录与安全
+然后面板「透明代理」页打开 TUN 开关（需要面板以 root 运行，OpenWrt 默认就是）。
+TUN 与 redirect 可同时开：TUN 接管本机，redirect 接管局域网。
+
+#### B7. OpenWrt 特别注意
+
+- 防火墙（fw4）与面板的 nft 表（`inet singbox`）互不干扰；关掉面板开关会自动撤表防断网。
+- 「同时接管本机流量」依赖 cgroup v2 且按 systemd 的 cgroup 路径排除面板进程，
+  OpenWrt（procd）下**不建议开启**，局域网接管不受影响。
+- 整网断网的救援命令同 A8 表格（`nft delete table inet singbox`）。
+
+### 场景 C：MIPS 小路由（Cudy AC1200 / MT7621，16MB flash）
+
+用 `*-linux-mipsle.tar.gz`（软浮点；qemu-mipsel 实测：登录、真实订阅 TLS 拉取、渲染、
+双内核切换、经内核真实出网全部通过）。内存 128MB 够用：面板 ~8MB + 内核真实占用 ~25MB
+（RSS 里其余是内核可回收的代码页）。
+
+**flash 是唯一硬约束**：16MB flash 刨掉系统通常只剩 1–2MB 可写，而内核解压后 15–20MB，
+所以内核必须放外置存储：
+
+```bash
+# 插上 U 盘 / TF 卡后（OpenWrt 默认自动挂载到 /mnt/sda1 类路径）
+mount | grep mmc\|sd         # 确认挂载点
+mkdir -p /mnt/usb/singbox
+tar -xzf /tmp/sing-box-web-rust-*-linux-mipsle.tar.gz -C /mnt/usb/singbox --strip-components=1
+cd /mnt/usb/singbox && ./panel -data /mnt/usb/singbox/data -listen 0.0.0.0:9090 -password 你的密码
+```
+
+其余流程与场景 B 完全一致（自启、透明代理、客户端指向）；包里 sing-box / mihomo
+都是官方 mipsle softfloat 静态版，无需挑选。extroot（把 overlay 整体搬到 U 盘）的机器
+可以无视外置存储注意事项，直接当大 flash 机器用。
+
+### 场景 D：Windows
+
+1. 解压 `*-windows-amd64.zip` 到任意目录（路径建议不要带中文）。
+2. 双击 `start.bat`（或命令行 `panel.exe -data .\panel-data -listen 0.0.0.0:9090 -password 你的密码`）。
+3. 浏览器 `http://127.0.0.1:9090`，按 A4 流程配置。
+4. **TUN 模式**：右键「以管理员身份运行」再启 start.bat；sing-box 需要 wintun.dll
+   （官方发行包自带；若 exe 同目录没有，请从 sing-box 官方发行包复制一份）。
+5. 开机自启：面板里开开关，自动注册 SYSTEM 计划任务 `sing-box-panel`（开机自动以最高权限启动）。
+
+### 首次登录与安全
 
 - 密码来源优先级：命令行 `-password` > 环境变量 `PANEL_PASSWORD` > `panel.conf` >
   自动生成随机密码（写入 `data/initial-password`）。
-- `panel.conf` 两项都留空 = 关闭登录（内网可信环境才建议）；忘记密码时改 conf 里的
-  username/password 重启面板即重置。
-- 面板带登录限速（5 次失败锁 30s 递增）与 Bearer token 会话（7 天）。
-- 暴露到公网请务必改强密码，或只监听 `127.0.0.1` 用反向代理加鉴权。
+- `panel.conf` 的 `username` 与 `password` **都留空** = 关闭登录（打开端口直接进首页），
+  只在内网可信环境使用；只留空 password = 保持现有密码。
+- 面板自带登录限速（连续 5 次失败锁 30 秒，逐次翻倍至 15 分钟）与 Bearer token 会话（7 天）。
+- 暴露公网：务必改强密码，或保持 `127.0.0.1` 监听 + 反向代理加鉴权。
 
 ## 迁移（从 Go 版）
 
