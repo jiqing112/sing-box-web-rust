@@ -58,16 +58,18 @@ jobs:
           pip install ziglang
           cargo install cargo-zigbuild
 
-      # mipsel 不能用 zig 当 libc（对 mips 支持 incomplete），用 musl.cc 交叉工具链链接
+      # mipsel 不能用 zig 当 libc（对 mips 支持不完整）；
+      # 用 OpenWrt 官方 SDK 自带的 mipsel musl 工具链（与 MT7621 同款配置，downloads.openwrt.org 高可用）
       - name: Install musl cross toolchain (mipsel)
         if: matrix.mipsel == true
         run: |
           set -e
-          curl -fsSL --connect-timeout 20 -o /tmp/mipsel-cross.tgz http://musl.cc/mipsel-linux-musl-cross.tgz \
-            || curl -fsSL --connect-timeout 20 -o /tmp/mipsel-cross.tgz https://github.com/musl-cc/musl.cc/raw/master/mipsel-linux-musl-cross.tgz
+          curl -fsSL --connect-timeout 20 -o /tmp/sdk.tar.zst "https://downloads.openwrt.org/releases/24.10.0/targets/ramips/mt7621/openwrt-sdk-24.10.0-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           sudo mkdir -p /opt/cross
-          sudo tar -xzf /tmp/mipsel-cross.tgz -C /opt/cross
-          echo "/opt/cross/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
+          sudo tar --zstd -xf /tmp/sdk.tar.zst -C /opt/cross --strip-components=1
+          TC=$(find /opt/cross/staging_dir -maxdepth 1 -name 'toolchain-*' | head -1)
+          echo "$TC/bin" >> "$GITHUB_PATH"
+          echo "STAGING_DIR=$TC" >> "$GITHUB_ENV"
 
       - name: Build
         working-directory: ${{ github.workspace }}
@@ -75,11 +77,12 @@ jobs:
         run: |
           set -e
           if [ "${{ matrix.mipsel }}" = "true" ]; then
-            export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
-            export CC_mipsel_unknown_linux_musl=mipsel-linux-musl-gcc
-            export AR_mipsel_unknown_linux_musl=mipsel-linux-musl-ar
-            # MT7621 无 FPU：软浮点；musl 目标默认 crt-static，产出静态 PIE
-            export RUSTFLAGS="-C target-feature=+soft-float -C link-arg=-static -C link-arg=-static-libgcc"
+            export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-openwrt-linux-musl-gcc
+            export CC_mipsel_unknown_linux_musl=mipsel-openwrt-linux-musl-gcc
+            export AR_mipsel_unknown_linux_musl=mipsel-openwrt-linux-musl-ar
+            # MT7621 无 FPU：软浮点。动态链接 OpenWrt musl（基线自带 loader 与 libgcc_s）；
+            # 该 target 的 crt-static 需要 libunwind，SDK musl 不提供，静态方案放弃
+            export RUSTFLAGS="-C target-feature=+soft-float"
             cargo +nightly build -Z build-std=std,panic_abort --release --target mipsel-unknown-linux-musl
             BIN="target/mipsel-unknown-linux-musl/release/sing-box-web"
           elif [ "${{ runner.os }}" = "Linux" ]; then
