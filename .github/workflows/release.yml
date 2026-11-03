@@ -40,6 +40,9 @@ jobs:
       # 与发布版本固定配对的内核；升级内核改这两行即可
       SB_VER: "1.14.3"
       MH_VER: "1.19.33"
+      # mipsel 用的钉死 nightly：cargo +nightly 会命中 runner 预装的旧 nightly
+      # （无 rust-src，build-std 直接失败），必须显式指名
+      NIGHTLY: nightly-2026-11-01
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +51,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.mipsel == true && 'nightly-2026-11-01' || 'stable' }}
+          toolchain: ${{ matrix.mipsel == true && env.NIGHTLY || 'stable' }}
           targets: ${{ matrix.mipsel != true && matrix.target || '' }}
           components: ${{ matrix.mipsel == true && 'rust-src' || '' }}
 
@@ -83,7 +86,7 @@ jobs:
             # MT7621 无 FPU：软浮点。动态链接 OpenWrt musl（基线自带 loader 与 libgcc_s）；
             # 该 target 的 crt-static 需要 libunwind，SDK musl 不提供，静态方案放弃
             export RUSTFLAGS="-C target-feature=+soft-float"
-            cargo +nightly build -Z build-std=std,panic_abort --release --target mipsel-unknown-linux-musl
+            cargo +${{ env.NIGHTLY }} build -Z build-std=std,panic_abort --release --target mipsel-unknown-linux-musl
             BIN="target/mipsel-unknown-linux-musl/release/sing-box-web"
           elif [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
@@ -106,7 +109,7 @@ jobs:
             # mihomo 的 Windows 资产是 zip（exe 名带版本号）
             curl -fsSL -o mihomo.zip "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.zip"
             unzip -jo mihomo.zip "mihomo-*.exe" -d pkg
-            mv pkg/mihomo-windows-amd64-v${MH_VER}.exe pkg/mihomo.exe
+            mv pkg/mihomo-*.exe pkg/mihomo.exe
           elif [ "$KA" = "mipsle-softfloat" ]; then
             curl -fsSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-mipsle-softfloat.tar.gz"
             tar -xzf sb.tgz
