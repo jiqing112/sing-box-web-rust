@@ -21,31 +21,65 @@ jobs:
             target: aarch64-unknown-linux-musl
             artifact: linux-arm64
             kernel_arch: linux-arm64
+          # MIPS 小路由（MT7621 / Cudy AC1200 等）。
+          # mipsel 是 Tier 3 目标：需要 nightly + build-std + musl 交叉工具链。
+          # continue-on-error：mipsel 构建失败不影响主流平台发版。
+          - os: ubuntu-latest
+            target: mipsel-unknown-linux-musl
+            artifact: linux-mipsle
+            kernel_arch: mipsle-softfloat
+            mipsel: true
+            continue-on-error: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: windows-amd64
             kernel_arch: windows-amd64
     runs-on: ${{ matrix.os }}
+    env:
+      # 与发布版本固定配对的内核；升级内核改这两行即可
+      SB_VER: "1.14.3"
+      MH_VER: "1.19.33"
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.mipsel == true && 'nightly-2026-11-01' || 'stable' }}
           targets: ${{ matrix.target }}
+          components: ${{ matrix.mipsel == true && 'rust-src' || '' }}
 
       - name: Install cargo-zigbuild + zig
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.mipsel != true
         run: |
           pip install ziglang
           cargo install cargo-zigbuild
+
+      # mipsel 不能用 zig 当 libc（对 mips 支持 incomplete），用 musl.cc 交叉工具链链接
+      - name: Install musl cross toolchain (mipsel)
+        if: matrix.mipsel == true
+        run: |
+          set -e
+          curl -fsSL --connect-timeout 20 -o /tmp/mipsel-cross.tgz http://musl.cc/mipsel-linux-musl-cross.tgz \
+            || curl -fsSL --connect-timeout 20 -o /tmp/mipsel-cross.tgz https://github.com/musl-cc/musl.cc/raw/master/mipsel-linux-musl-cross.tgz
+          sudo mkdir -p /opt/cross
+          sudo tar -xzf /tmp/mipsel-cross.tgz -C /opt/cross
+          echo "/opt/cross/mipsel-linux-musl-cross/bin" >> "$GITHUB_PATH"
 
       - name: Build
         working-directory: ${{ github.workspace }}
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [ "${{ runner.os }}" = "Linux" ]; then
+          set -e
+          if [ "${{ matrix.mipsel }}" = "true" ]; then
+            export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
+            export CC_mipsel_unknown_linux_musl=mipsel-linux-musl-gcc
+            export AR_mipsel_unknown_linux_musl=mipsel-linux-musl-ar
+            # MT7621 无 FPU：软浮点；musl 目标默认 crt-static，产出静态 PIE
+            export RUSTFLAGS="-C target-feature=+soft-float -C link-arg=-static -C link-arg=-static-libgcc"
+            cargo +nightly build -Z build-std=std,panic_abort --release --target mipsel-unknown-linux-musl
+            BIN="target/mipsel-unknown-linux-musl/release/sing-box-web"
+          elif [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
             BIN="target/${{ matrix.target }}/release/sing-box-web"
           else
@@ -57,34 +91,37 @@ jobs:
       - name: Download kernels
         shell: bash
         run: |
-          # 与发布版本固定配对的内核；升级内核改这两行即可
-          SB_VER=1.14.3
-          MH_VER=1.19.33
+          set -e
           mkdir -p pkg
-          if [ "${{ matrix.kernel_arch }}" = "windows-amd64" ]; then
-            curl -sL -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-windows-amd64.zip"
+          KA="${{ matrix.kernel_arch }}"
+          if [ "$KA" = "windows-amd64" ]; then
+            curl -fsSL -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-windows-amd64.zip"
             unzip -j sb.zip "*/sing-box.exe" -d pkg
-            mv pkg/sing-box.exe pkg/sing-box.exe
-            curl -sL -o pkg/mihomo.exe.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.gz"
+            curl -fsSL -o pkg/mihomo.exe.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.gz"
             gunzip -f pkg/mihomo.exe.gz
-          else
-            curl -sL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-${{ matrix.kernel_arch }}.tar.gz"
+          elif [ "$KA" = "mipsle-softfloat" ]; then
+            curl -fsSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-mipsle-softfloat.tar.gz"
             tar -xzf sb.tgz
-            cp sing-box-${SB_VER}-${{ matrix.kernel_arch }}/sing-box pkg/
-            curl -sL -o pkg/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-${{ matrix.kernel_arch }}-v${MH_VER}.gz"
+            cp sing-box-${SB_VER}-linux-mipsle-softfloat/sing-box pkg/
+            curl -fsSL -o pkg/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-linux-mipsle-softfloat-v${MH_VER}.gz"
+            gunzip -f pkg/mihomo.gz
+          else
+            curl -fsSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-${KA}.tar.gz"
+            tar -xzf sb.tgz
+            cp sing-box-${SB_VER}-${KA}/sing-box pkg/
+            curl -fsSL -o pkg/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-${KA}-v${MH_VER}.gz"
             gunzip -f pkg/mihomo.gz
           fi
-          echo "SB_VER=$SB_VER" >> "$GITHUB_ENV"
-          echo "MH_VER=$MH_VER" >> "$GITHUB_ENV"
 
       - name: Package
         shell: bash
         run: |
+          set -e
           VERSION="${GITHUB_REF_NAME#v}"
           NAME="sing-box-web-rust-${VERSION}-${{ matrix.artifact }}"
           mkdir -p "dist/$NAME"
           cp "$BIN" "dist/$NAME/panel${{ runner.os == 'Windows' && '.exe' || '' }}"
-          cp pkg/sing-box* "dist/$NAME/"
+          cp pkg/sing-box* "dist/$NAME/" 2>/dev/null || true
           [ -f pkg/mihomo ] && cp pkg/mihomo "dist/$NAME/" || true
           [ -f pkg/mihomo.exe ] && cp pkg/mihomo.exe "dist/$NAME/" || true
           cp -r deploy/* "dist/$NAME/"
@@ -111,13 +148,18 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: dist
-      - uses: softprops/action-gh-release@v2
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          fail_on_unmatched_files: false
           generate_release_notes: true
