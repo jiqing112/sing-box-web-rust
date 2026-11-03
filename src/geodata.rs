@@ -5,7 +5,8 @@
 // 并发调用共享同一次下载；单源 8 秒内低于 48 KB/s 自动换镜像。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use portable_atomic::AtomicI64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

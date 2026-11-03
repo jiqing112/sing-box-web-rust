@@ -3,6 +3,7 @@
 面向 **MT7981 / 16 MB flash** 小机器的 sing-box Web 控制面，Rust 重写版：
 **单二进制、前端 embed、静态 musl 链接、常驻内存 5–8 MB**。
 内置 **sing-box 与 mihomo 双内核**，面板里一键切换。
+x86_64 / arm64 / mipsel(软浮点) 三架构可用。
 
 本仓库是 [`sing-box-web`](https://github.com/jiqing112/sing-box-web)（Go 版）的 **Rust 完整移植**：
 接口路径、JSON 字段、配置文件格式、数据目录结构与 Go 版逐字段兼容，
@@ -15,6 +16,7 @@
 | linux-amd64 (musl) | ~8.7 MB | 全静态，任何 glibc/musl 系统直接跑 |
 | linux-arm64 (musl) | ~8.2 MB | MT7981（Filogic 820, Cortex-A53）即此架构 |
 | windows-amd64 | ~8.3 MB | 同功能 |
+| linux-mipsle (musl, 软浮点) | ~8.5 MB | MT7621 / MT7981 之外的 MIPS 小路由（Cudy AC1200 等），qemu-mipsel 实测 |
 
 其中 ~5.2 MB 是内嵌的 mihomo geo 数据（gzip 压缩包内 GeoSite.dat + geoip.metadb）。
 不需要离线 geo 时用 `--no-default-features` 编译可减到 ~3.1 MB。
@@ -72,6 +74,13 @@ cargo build --release
 cargo zigbuild --release --target x86_64-unknown-linux-musl
 # Linux arm64（MT7981）
 cargo zigbuild --release --target aarch64-unknown-linux-musl
+# Linux mipsel 软浮点（MT7621，Cudy AC1200 等；Tier 3 目标，需 nightly）
+rustup target add mipsel-unknown-linux-musl --toolchain nightly
+rustup component add rust-src --toolchain nightly
+export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=mipsel-linux-musl-gcc
+export CC_mipsel_unknown_linux_musl=mipsel-linux-musl-gcc
+export RUSTFLAGS="-C target-feature=+soft-float -C link-arg=-static"
+cargo +nightly build -Z build-std=std,panic_abort --release --target mipsel-unknown-linux-musl
 # 不内嵌 geo（二进制 ~3.1 MB，首次切 mihomo 需联网下载 geo）
 cargo zigbuild --release --target aarch64-unknown-linux-musl --no-default-features
 ```

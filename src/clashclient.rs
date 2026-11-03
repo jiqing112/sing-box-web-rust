@@ -2,7 +2,8 @@
 // 延迟结果只存内存，按 TTL 过期；进程重启即清零。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicI64, AtomicU64};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -206,8 +207,8 @@ impl Client {
         let (mut up_tx, mut up_rx) = ws.split();
 
         let sums = std::sync::Arc::new((
-            std::sync::atomic::AtomicI64::new(0),
-            std::sync::atomic::AtomicI64::new(0),
+            portable_atomic::AtomicI64::new(0),
+            portable_atomic::AtomicI64::new(0),
         ));
         {
             let sums = sums.clone();
