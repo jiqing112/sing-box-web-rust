@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -42,11 +43,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 注意：mipsel 不能让 rustup 装 target——Tier 3 没有预编译 rust-std，
+      # build-std 从源码编译 std，只需要 nightly + rust-src
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.mipsel == true && 'nightly-2026-11-01' || 'stable' }}
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.mipsel == true && '' || matrix.target }}
           components: ${{ matrix.mipsel == true && 'rust-src' || '' }}
 
       - name: Install cargo-zigbuild + zig
@@ -148,7 +151,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v4
         with:
