@@ -297,6 +297,7 @@ $('#loginForm').addEventListener('submit', async (e) => {
       if (pass !== $('#loginPass2').value) { $('#loginErr').textContent = '两次输入的密码不一致'; return; }
       await api('/api/v1/auth/setup', { method: 'POST', body: JSON.stringify({ username: user, password: pass }) });
       state.setupMode = false;
+      state.needsSetup = false;
       await login(user, pass);
     } else {
       await login($('#loginUser').value.trim(), $('#loginPass').value);

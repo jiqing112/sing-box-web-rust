@@ -105,7 +105,7 @@ cargo test            # 订阅解析 / 双内核渲染 / 引擎差异 / inspect 
 - **发版**：推送 `v*` 标签即自动构建全部平台并发布 Release——
 
   ```bash
-  git tag v1.0.1 && git push origin v1.0.1
+  git tag v1.1.0 && git push origin v1.1.0
   ```
 
   完成后在 [Releases](https://github.com/jiqing112/sing-box-web-rust/releases) 页面拿到各平台
@@ -163,15 +163,15 @@ cargo test            # 订阅解析 / 双内核渲染 / 引擎差异 / inspect 
 ```bash
 # 在 Release 页找到最新版本，或直接用命令下载（版本号自行替换）
 curl -fsSL -o /tmp/panel.tgz \
-  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.0.1/sing-box-web-rust-1.0.1-linux-amd64.tar.gz
+  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.1.0/sing-box-web-rust-1.1.0-linux-amd64.tar.gz
 
 # 校验完整性（可选但建议）
 curl -fsSL -o /tmp/panel.tgz.sha256 \
-  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.0.1/sing-box-web-rust-1.0.1-linux-amd64.tar.gz.sha256
+  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.1.0/sing-box-web-rust-1.1.0-linux-amd64.tar.gz.sha256
 cd /tmp && sha256sum -c panel.tgz.sha256
-# 预期输出: sing-box-web-rust-1.0.1-linux-amd64.tar.gz: OK
+# 预期输出: sing-box-web-rust-1.1.0-linux-amd64.tar.gz: OK
 
-tar -xzf /tmp/panel.tgz -C /tmp && cd /tmp/sing-box-web-rust-1.0.1-linux-amd64
+tar -xzf /tmp/panel.tgz -C /tmp && cd /tmp/sing-box-web-rust-1.1.0-linux-amd64
 ls
 # 预期: install.sh  mihomo  panel  panel.bat  panel.conf  README-linux.txt
 #       README-windows.txt  sing-box  sing-box-panel.service  start.bat
