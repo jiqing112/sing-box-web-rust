@@ -503,6 +503,40 @@ async fn run() -> i32 {
                     engine::label(&eng)
                 );
             }
+        } else {
+            // 首次运行：还没有已应用配置时，尝试「渲染 → 应用」一体完成
+            // （校验/落盘/启动核心/探活），让添加过订阅的部署开箱即跑。
+            // best-effort：任何失败只记录原因，面板照常起，网页端仍可手工处理。
+            let mut autostart_core = true;
+            if args.autostart_explicit.is_none() {
+                if let Some(v) = settings.autostart_core {
+                    autostart_core = v;
+                }
+            }
+            let has_enabled = st.all_nodes().iter().any(|n| n.enabled);
+            if !autostart_core {
+                eprintln!("首次启动: 核心自启已在面板里关闭，跳过自动应用");
+            } else if !has_enabled {
+                eprintln!("首次启动: 暂无启用节点，跳过自动应用（添加订阅后请在配置页应用或直接点启动）");
+            } else {
+                match app.render_config(&settings).await {
+                    Err(e) => eprintln!("首次启动自动渲染失败: {e}"),
+                    Ok(raw) => {
+                        let r = tokio::time::timeout(
+                            std::time::Duration::from_secs(150),
+                            app.applier.apply(&raw, "首次启动自动应用"),
+                        )
+                        .await;
+                        match r {
+                            Ok(Ok(())) => eprintln!("首次启动: 配置已自动应用，核心已启动"),
+                            Ok(Err(e)) => eprintln!(
+                                "首次启动自动应用失败（可在配置页手工重试）: {e}"
+                            ),
+                            Err(_) => eprintln!("首次启动自动应用超时"),
+                        }
+                    }
+                }
+            }
         }
     }
 

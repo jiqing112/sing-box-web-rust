@@ -28,7 +28,7 @@ use crate::supervisor::Supervisor;
 use crate::tproxy;
 
 /// 面板版本。前端从 /status 读取。
-    pub const VERSION: &str = "1.1.0";
+    pub const VERSION: &str = "1.1.2";
 
 /// 覆盖「校验 + 重启 + 探活」全过程；mihomo 首次校验会下载 geo 数据。
 pub const APPLY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -771,6 +771,40 @@ impl Server {
         json_ok(json!({"lines": lines}))
     }
 
+    /// 「启动核心」时当前还没有任何已应用配置：渲染+应用一体完成
+    /// （校验/落盘/启动/探活），让添加过订阅的部署点一下就能跑。
+    /// 返回 None 表示已有配置、不适用本引导，调用方走常规 start。
+    async fn first_run_start(&self) -> Option<Result<(), String>> {
+        if !self
+            .store
+            .config()
+            .map(|c| c.is_empty())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        if !self.store.all_nodes().iter().any(|n| n.enabled) {
+            return Some(Err(
+                "尚无已应用配置且没有启用节点：请先在「订阅」页添加订阅，节点启用后再启动"
+                    .into(),
+            ));
+        }
+        let set = self.store.settings();
+        let raw = match self.render_config(&set).await {
+            Ok(r) => r,
+            Err(e) => return Some(Err(format!("自动渲染配置失败: {e}"))),
+        };
+        match self.applier.apply(&raw, "首次启动自动应用").await {
+            Ok(()) => {
+                eprintln!("首次启动: 配置已自动应用，核心已拉起");
+                Some(Ok(()))
+            }
+            Err(e) => Some(Err(format!(
+                "自动应用配置失败（可在配置页手工重试）: {e}"
+            ))),
+        }
+    }
+
     async fn h_service(
         State(app): State<Arc<Server>>,
         headers: HeaderMap,
@@ -783,9 +817,12 @@ impl Server {
         let res: Result<(), String> = match action.as_str() {
             "start" => {
                 app.sup.reset_crashes();
-                let r = match app.sup.start() {
-                    Err(e) if e == "already running" => Ok(()),
-                    other => other,
+                let r = match app.first_run_start().await {
+                    Some(r) => r,
+                    None => match app.sup.start() {
+                        Err(e) if e == "already running" => Ok(()),
+                        other => other,
+                    },
                 };
                 if r.is_ok() && set.tproxy_enabled {
                     let mut cidrs = set.lan_cidrs.clone();
