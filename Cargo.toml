@@ -1,6 +1,6 @@
 [package]
 name = "sing-box-web"
-version = "1.1.2"
+version = "1.2.0"
 edition = "2021"
 description = "sing-box / mihomo web control panel for low-end routers (MT7981 / 16MB flash)"
 

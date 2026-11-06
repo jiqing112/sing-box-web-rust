@@ -357,28 +357,184 @@ mod autostart {
         ]
     }
 
-    /// SYSTEM + 最高权限开机自启；失败 1 分钟后自动重启，无时长限制。
-    pub fn set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
-        if !on {
-            run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")])?;
-            return Ok(());
+    fn out_msg(out: &std::process::Output) -> String {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        let msg = msg.trim();
+        if msg.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            msg.to_string()
         }
+    }
+
+    /// SYSTEM + 最高权限开机自启；失败 1 分钟后自动重启，无时长限制。
+    ///
+    /// 权限策略：先直跑（管理员/SYSTEM 面板零改动、不弹窗）；直跑失败
+    /// （普通用户必然「拒绝访问」）时自动弹 UAC，由提权进程完成任务并把
+    /// 结果写入临时文件闭环——普通用户连 /Query 本任务的权限都没有，
+    /// 成败只能在提权进程内部判定。任务取消/超时返回明确中文报错。
+    /// 安全约束：提权只服务本固定用途（固定任务名 + 本 exe/数据目录），
+    /// 脚本由面板生成、参数写死，不接受任何外部传入命令。
+    pub fn set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe = exe.canonicalize().unwrap_or(exe);
-        // 已存在时先删再建，保证参数指向当前 exe/data
-        let _ = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")]);
-        let out = run(&create_args(&exe, data_dir))?;
-        if !out.status.success() {
-            let msg = String::from_utf8_lossy(&out.stderr);
-            let msg = msg.trim();
-            let msg = if msg.is_empty() {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
+        // 1) 直跑。ON 时先删再建，保证任务参数指向当前 exe/data。
+        let direct: Result<(), String> = if !on {
+            let out = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")])?;
+            if out.status.success() {
+                Ok(())
             } else {
-                msg.to_string()
-            };
-            return Err(format!("schtasks 失败: {msg}"));
+                let msg = out_msg(&out);
+                // 任务本就不存在 = 目标已达成（中英文系统文案都含这两类字样）
+                if msg.contains("找不到") || msg.to_lowercase().contains("cannot find") {
+                    Ok(())
+                } else {
+                    Err(msg)
+                }
+            }
+        } else {
+            let _ = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")]);
+            let out = run(&create_args(&exe, data_dir))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(out_msg(&out))
+            }
+        };
+        if direct.is_ok() {
+            return Ok(());
         }
-        Ok(())
+        // 2) 权限不足 → UAC 提权闭环。
+        eprintln!(
+            "面板开机自启: 直接执行失败（{}），尝试 UAC 提权——请在弹出的授权窗口中点「是」",
+            direct.unwrap_err()
+        );
+        elevate_set(on, &exe, data_dir)
+    }
+
+    /// 生成计划任务 XML（对齐 Go 版任务形状：BootTrigger + SYSTEM +
+    /// 最高权限 + 失败 1 分钟后重启 3 次）。UTF-16LE BOM 写盘，中文路径无忧。
+    fn build_task_xml(exe: &std::path::Path, data_dir: &std::path::Path) -> String {
+        let esc = |x: &str| {
+            x.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        };
+        let args = format!("-data \"{}\"", esc(&data_dir.to_string_lossy()));
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions>
+</Task>"#,
+            esc(&exe.to_string_lossy()),
+            args
+        )
+    }
+
+    fn utf16le_b64(s: &str) -> String {
+        use base64::Engine;
+        let codes: Vec<u8> = s
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        base64::engine::general_purpose::STANDARD.encode(codes)
+    }
+
+    /// 提权要执行的 PowerShell 脚本：schtasks + 内部 /Query 验证 + 结果文件。
+    /// 普通用户无权 /Query SYSTEM 任务，成败判定必须在提权进程内完成。
+    fn build_elevated_ps(on: bool, xml_path: &std::path::Path, result: &std::path::Path) -> String {
+        let q = |x: &std::path::Path| x.to_string_lossy().replace('\'', "''");
+        let (xml, result) = (q(xml_path), q(result));
+        if on {
+            format!(
+                "schtasks /Create /TN {TASK} /XML '{xml}' /F\r\n\
+                 if ($LASTEXITCODE -ne 0) {{ Set-Content -LiteralPath '{result}' -Value 'FAIL_CREATE' -Encoding ascii; exit }}\r\n\
+                 schtasks /Query /TN {TASK} > $null\r\n\
+                 if ($LASTEXITCODE -eq 0) {{ Set-Content -LiteralPath '{result}' -Value 'OK' -Encoding ascii }} else {{ Set-Content -LiteralPath '{result}' -Value 'FAIL_QUERY' -Encoding ascii }}"
+            )
+        } else {
+            format!(
+                "schtasks /Delete /TN {TASK} /F\r\n\
+                 if ($LASTEXITCODE -eq 0) {{ Set-Content -LiteralPath '{result}' -Value 'OK' -Encoding ascii; exit }}\r\n\
+                 schtasks /Query /TN {TASK} > $null 2>&1\r\n\
+                 if ($LASTEXITCODE -ne 0) {{ Set-Content -LiteralPath '{result}' -Value 'OK' -Encoding ascii }} else {{ Set-Content -LiteralPath '{result}' -Value 'FAIL' -Encoding ascii }}"
+            )
+        }
+    }
+
+    /// UAC 提权执行：弹窗（本地交互桌面）→ 等待 → 读结果文件闭环。
+    /// 用户点「否」或 UAC 约 2 分钟超时：Start-Process 抛错、外层退出非零、
+    /// 结果文件缺失，统一归为授权失败。
+    fn elevate_set(on: bool, exe: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
+        use base64::Engine;
+        let dir = std::env::temp_dir();
+        let xml_path = dir.join(format!("sb-panel-task-{}.xml", crate::util::rand_hex(6)));
+        let result = dir.join(format!("sb-panel-task-{}.txt", crate::util::rand_hex(6)));
+        let _ = std::fs::remove_file(&result);
+
+        let write_result = if on {
+            std::fs::write(&xml_path, utf16le_bytes(&build_task_xml(exe, data_dir)))
+        } else {
+            Ok(()) // OFF 无需 XML
+        };
+        if let Err(e) = write_result {
+            return Err(format!("写入计划任务 XML 失败: {e}"));
+        }
+
+        let ps = build_elevated_ps(on, &xml_path, &result);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(ps.encode_utf16().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>());
+        let out = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-EncodedCommand','{encoded}'"
+                ),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        let result_state = std::fs::read_to_string(&result).unwrap_or_default();
+        let _ = std::fs::remove_file(&result);
+        let _ = std::fs::remove_file(&xml_path);
+
+        if result_state.trim() == "OK" {
+            eprintln!("面板开机自启: UAC 提权执行成功");
+            return Ok(());
+        }
+        let detail = match out {
+            Ok(o) if !o.status.success() => format!(
+                "（提权进程异常退出: {}）",
+                out_msg(&o)
+            ),
+            Ok(_) => format!("（提权脚本报告: {}）", result_state.trim()),
+            Err(e) => format!("（{e}）"),
+        };
+        Err(format!(
+            "需要管理员权限：UAC 未获授权或操作失败{detail}。可在本机重新点击并在弹窗中确认，或运行 panel.bat autostart-on|off"
+        ))
+    }
+
+    fn utf16le_bytes(s: &str) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xFE]; // BOM
+        for c in s.encode_utf16() {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+        out
     }
 
     pub fn note() -> &'static str {
@@ -404,6 +560,61 @@ mod autostart {
             assert_eq!(args.len(), 12);
             assert_eq!(args[0], "/Create");
             assert_eq!(args.last().unwrap(), "/F");
+        }
+
+        /// 提权 XML：SYSTEM SID、命令与参数就位、XML 特殊字符已转义。
+        #[test]
+        fn task_xml_contains_command_and_escapes() {
+            let xml = build_task_xml(
+                std::path::Path::new(r"C:\Program Files\panel\panel.exe"),
+                std::path::Path::new(r"C:\Program Files\panel\data"),
+            );
+            assert!(xml.contains("<UserId>S-1-5-18</UserId>"));
+            // SYSTEM 主体不得带 RunLevel（XML schema 拒绝，实测 (4,83):RunLevel:Highest 报错）
+            assert!(!xml.contains("RunLevel"));
+            assert!(xml.contains(r"<Command>C:\Program Files\panel\panel.exe</Command>"));
+            assert!(xml.contains(r#"<Arguments>-data "C:\Program Files\panel\data"</Arguments>"#));
+            assert!(xml.contains("<BootTrigger>"));
+            assert!(xml.contains("RestartOnFailure"));
+            // & 转义（路径含 & 时不产生非法 XML）
+            let xml2 = build_task_xml(
+                std::path::Path::new(r"C:\a&b\panel.exe"),
+                std::path::Path::new(r"C:\d"),
+            );
+            assert!(xml2.contains("C:\\a&amp;b\\panel.exe"));
+        }
+
+        /// 提权脚本：ON 用 /XML + 内部 /Query 验证 + 结果文件；OFF 用 /Delete。
+        #[test]
+        fn elevated_ps_covers_both_directions() {
+            let xml = std::path::Path::new(r"C:\Temp\x.xml");
+            let result = std::path::Path::new(r"C:\Temp\r.txt");
+            let on = build_elevated_ps(true, xml, result);
+            assert!(on.contains("schtasks /Create /TN sing-box-panel /XML 'C:\\Temp\\x.xml' /F"));
+            assert!(on.contains("schtasks /Query /TN sing-box-panel"));
+            assert!(on.contains("'C:\\Temp\\r.txt'"));
+            assert!(on.contains("'OK'") && on.contains("'FAIL_CREATE'"));
+            let off = build_elevated_ps(false, xml, result);
+            assert!(off.contains("schtasks /Delete /TN sing-box-panel /F"));
+            assert!(!off.contains("/XML"));
+        }
+
+        /// EncodedCommand 的 base64 必须是 UTF-16LE（PowerShell 约定，无 BOM），可无损往返。
+        #[test]
+        fn utf16le_b64_roundtrip_and_unicode() {
+            use base64::Engine;
+            let src = "schtasks /Create 中文路径 test";
+            let b64 = utf16le_b64(src);
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .expect("valid base64");
+            let u16s: Vec<u16> = raw
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            assert_eq!(String::from_utf16(&u16s).unwrap(), src);
+            // 对比：XML 文件用的 utf16le_bytes 才带 BOM
+            assert_eq!(&utf16le_bytes(src)[..2], &[0xFF, 0xFE]);
         }
     }
 }

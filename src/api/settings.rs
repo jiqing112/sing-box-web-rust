@@ -655,9 +655,15 @@ impl Server {
             Err(resp) => return resp,
         };
         if let Some(panel) = inb.get("panel").and_then(|v| v.as_bool()) {
-            if let Err(e) =
-                crate::platform::set_autostart(panel, app.store.dir())
-            {
+            // UAC 提权路径会阻塞最长约 2 分钟（等待用户确认弹窗），
+            // 丢进 spawn_blocking 避免占死 tokio worker。
+            let data_dir = app.store.dir().to_path_buf();
+            let r = tokio::task::spawn_blocking(move || {
+                crate::platform::set_autostart(panel, &data_dir)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("内部错误: {e}")));
+            if let Err(e) = r {
                 return err_json(StatusCode::BAD_REQUEST, "autostart_failed", &e);
             }
         }
