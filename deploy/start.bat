@@ -22,7 +22,19 @@ if "%OPEN_URL:~7,7%"=="0.0.0.0" set "OPEN_URL=http://127.0.0.1%OPEN_URL:~14%"
 rem 已在运行就直接开网页，不重复启动
 set "RUNNING="
 for /f "tokens=2" %%p in ('tasklist /FI "IMAGENAME eq panel.exe" 2^>nul ^| findstr /I "panel.exe"') do set "RUNNING=%%p"
-if defined RUNNING goto :started
+if defined RUNNING goto rem 启动失败的最常见原因：监听端口被占用（本机已有别的面板实例）
+:diag_start_fail
+for /f "delims=: tokens=2" %%p in ("%LISTEN%") do set "PORT=%%p"
+netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1 && (
+  echo 启动失败：端口 %PORT% 已被占用——本机很可能已在运行另一个面板实例。
+  echo   两台并存：把 panel.conf 的 listen= 改成其他端口后再运行；
+  echo   替换旧版：先停掉旧面板（或卸载它的自启任务）再启动。
+) || (
+  echo 启动失败：请直接运行 panel.exe 查看报错信息。
+)
+exit /b 1
+
+:started
 
 echo 正在后台启动面板（无黑窗，托盘图标可用）...
 if not exist "%~dp0sing-box.exe" echo [提示] 同目录未找到 sing-box.exe，核心将无法启动（详见 README）。
@@ -31,7 +43,7 @@ ping -n 4 127.0.0.1 >nul
 set "RUNNING="
 for /f "tokens=2" %%p in ('tasklist /FI "IMAGENAME eq panel.exe" 2^>nul ^| findstr /I "panel.exe"') do set "RUNNING=%%p"
 if not defined RUNNING (
-  echo 启动失败：请直接运行 panel.exe 查看报错信息。
+  call :diag_start_fail
   pause
   exit /b 1
 )

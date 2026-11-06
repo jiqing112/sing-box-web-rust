@@ -95,6 +95,18 @@ set "OPEN_URL=http://%LISTEN%"
 if "%OPEN_URL:~7,7%"=="0.0.0.0" set "OPEN_URL=http://127.0.0.1%OPEN_URL:~14%"
 exit /b 0
 
+rem 启动失败的常见原因诊断：监听端口被占用（本机已有别的面板实例）
+:diag_start_fail
+for /f "delims=: tokens=2" %%p in ("%LISTEN%") do set "PORT=%%p"
+netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1 && (
+  echo 启动失败：端口 %PORT% 已被占用——本机很可能已在运行另一个面板实例。
+  echo   两台并存：把 panel.conf 的 listen= 改成其他端口后再运行本脚本；
+  echo   替换旧版：先停掉旧面板（或卸载它的自启任务）再启动。
+) || (
+  echo 启动失败：请直接运行 panel.exe 查看报错信息。
+)
+exit /b 1
+
 rem RUNNING 置为 PID（在运行）或空（未运行）；返回 0=运行中
 :is_running
 set "RUNNING="
@@ -125,10 +137,22 @@ call :is_running
 if %errorlevel%==0 (
   echo 面板已后台运行 [PID %RUNNING%]，双击托盘图标打开 %OPEN_URL%
 ) else (
-  echo 启动失败：请直接运行 panel.exe 查看报错信息。
+  call :diag_start_fail
   exit /b 1
 )
 exit /b 0
+
+rem 启动失败的最常见原因：监听端口被占用（本机已有别的面板实例）
+:diag_start_fail
+for /f "delims=: tokens=2" %%p in ("%LISTEN%") do set "PORT=%%p"
+netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1 && (
+  echo 启动失败：端口 %PORT% 已被占用——本机很可能已在运行另一个面板实例。
+  echo   两台并存：把 panel.conf 的 listen= 改成其他端口后再运行本脚本；
+  echo   替换旧版：先停掉旧面板（或卸载它的自启任务）再启动。
+) || (
+  echo 启动失败：请直接运行 panel.exe 查看报错信息。
+)
+exit /b 1
 
 :do_stop
 call :is_running
