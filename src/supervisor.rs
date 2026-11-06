@@ -376,9 +376,11 @@ fn utf8_len(b: u8) -> usize {
 }
 
 /// 上次面板强退后残留的内核进程清扫。bin 为空时跳过。
-pub fn sweep_orphans(bin: &str, data_dir: &Path) {
-    if bin.is_empty() {
+/// 清理上次面板被强杀后残留的内核进程。
+/// 传全部内核路径：Windows 侧会合并成一次 PowerShell 查询，避免冷启动多等 10 秒。
+pub fn sweep_orphans(bins: &[String], data_dir: &Path) {
+    if bins.iter().all(|b| b.is_empty()) {
         return;
     }
-    crate::supervisor_sys::sweep_orphans(bin, data_dir);
+    crate::supervisor_sys::sweep_orphans(bins, data_dir);
 }

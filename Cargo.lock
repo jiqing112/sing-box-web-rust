@@ -1380,6 +1380,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "url",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

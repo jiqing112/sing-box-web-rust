@@ -22,7 +22,7 @@ sing-box panel · Linux 免安装包
   1. 面板装到 /opt/sing-box-panel/bin/panel，数据在 /opt/sing-box-panel/data
   2. sing-box 内核装到 /usr/local/bin/sing-box，mihomo 装到 /usr/local/bin/mihomo
   3. 安装并启用 systemd 服务 sing-box-panel（开机自启）
-  4. 首次启动生成随机密码，并打印出来（也在 /opt/sing-box-panel/data/initial-password）
+  4. 首次打开网页会要求设置登录账户密码（panel.conf 填 password= 可跳过）
 
 安装完访问 http://<本机IP>:9090 ，用 admin + 打印出来的密码登录。
 
@@ -118,4 +118,3 @@ mihomo 第一次启动会下载约 12 MB 的 geo 数据（geosite.dat / country.
   /opt/sing-box-panel/data/nodes-*.json       订阅解析出的节点（两个内核共用）
   /opt/sing-box-panel/data/snapshots/         配置快照（默认 3 份，可回滚）
   /opt/sing-box-panel/data/mihomo/            mihomo 工作目录（geo 数据、cache.db）
-  /opt/sing-box-panel/data/initial-password   首次启动生成的密码，登录后建议删除

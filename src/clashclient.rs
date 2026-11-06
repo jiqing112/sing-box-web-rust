@@ -2,7 +2,7 @@
 // 延迟结果只存内存，按 TTL 过期；进程重启即清零。
 
 use std::collections::HashMap;
-use portable_atomic::{AtomicI64, AtomicU64};
+use portable_atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -116,6 +116,16 @@ impl Client {
     /// 清空延迟缓存。切换内核后必须调用：两个内核的测量口径不同。
     pub fn reset_delays(&self) {
         self.delays.lock().unwrap().clear();
+    }
+
+    /// 读未过期的延迟缓存。None = 没测过或已过期，调用方需要实测。
+    pub fn cached_delay(&self, tag: &str) -> Option<i64> {
+        let ttl = self.ttl.load(Ordering::Relaxed) as i64;
+        let now = crate::util::unix_now();
+        let g = self.delays.lock().unwrap();
+        g.get(tag)
+            .filter(|(_, at)| now - at < ttl)
+            .map(|(ms, _)| *ms)
     }
 
     /// 未过期的延迟缓存：{tag: {ms, at}}。

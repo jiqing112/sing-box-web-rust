@@ -106,6 +106,8 @@ jobs:
           if [ "$KA" = "windows-amd64" ]; then
             curl -fsSL -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-windows-amd64.zip"
             unzip -j sb.zip "*/sing-box.exe" -d pkg
+            # 官方 zip 里带 wintun.dll：一起打进去，老版本内核/被安全软件清掉时仍能开 TUN
+            unzip -j sb.zip "*/wintun.dll" -d pkg || true
             # mihomo 的 Windows 资产是 zip（exe 名带版本号）
             curl -fsSL -o mihomo.zip "https://github.com/MetaCubeX/mihomo/releases/download/v${MH_VER}/mihomo-windows-amd64-v${MH_VER}.zip"
             unzip -jo mihomo.zip "mihomo-*.exe" -d pkg
@@ -135,6 +137,7 @@ jobs:
           cp pkg/sing-box* "dist/$NAME/" 2>/dev/null || true
           if [ -f pkg/mihomo ]; then cp pkg/mihomo "dist/$NAME/"; fi
           if [ -f pkg/mihomo.exe ]; then cp pkg/mihomo.exe "dist/$NAME/"; fi
+          if [ -f pkg/wintun.dll ]; then cp pkg/wintun.dll "dist/$NAME/"; fi
           cp -r deploy/* "dist/$NAME/"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then

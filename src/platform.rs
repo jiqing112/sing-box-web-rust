@@ -315,47 +315,96 @@ mod autostart {
     const TASK: &str = "sing-box-panel";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    fn run(args: &[&str]) -> Result<String, String> {
-        let out = Command::new("schtasks")
+    /// 直接传参数数组给 schtasks，不做任何字符串拼接再拆分的处理：
+    /// 安装路径带空格时（`C:\Program Files\...`）拼接拆分会把 /TR 拆坏。
+    fn run(args: &[String]) -> Result<std::process::Output, String> {
+        Command::new("schtasks")
             .args(args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| e.to_string())?;
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            .map_err(|e| e.to_string())
+    }
+
+    fn s(v: &str) -> String {
+        v.to_string()
     }
 
     use std::os::windows::process::CommandExt;
 
     pub fn enabled() -> Result<bool, String> {
-        let out = run(&["/Query", "/TN", TASK]).map_err(|e| e.to_string())?;
-        Ok(out.contains(TASK))
+        let out = run(&[s("/Query"), s("/TN"), s(TASK)])?;
+        // 用退出码判断：中文系统输出的是「成功」而不是 SUCCESS，且任务不存在时退出码非 0。
+        Ok(out.status.success())
+    }
+
+    /// `/Create` 的完整参数表。/TR 的整段命令**作为一个参数**传下去，
+    /// 内部引号由 schtasks 自己解析；安装路径带空格也不会被拆散。
+    fn create_args(exe: &std::path::Path, data_dir: &std::path::Path) -> Vec<String> {
+        let tr = format!("\"{}\" -data \"{}\"", exe.display(), data_dir.display());
+        vec![
+            s("/Create"),
+            s("/TN"),
+            s(TASK),
+            s("/TR"),
+            tr,
+            s("/SC"),
+            s("ONSTART"),
+            s("/RU"),
+            s("SYSTEM"),
+            s("/RL"),
+            s("HIGHEST"),
+            s("/F"),
+        ]
     }
 
     /// SYSTEM + 最高权限开机自启；失败 1 分钟后自动重启，无时长限制。
     pub fn set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
         if !on {
-            run(&["/Delete", "/TN", TASK, "/F"]).map_err(|e| e.to_string())?;
+            run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")])?;
             return Ok(());
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe = exe.canonicalize().unwrap_or(exe);
         // 已存在时先删再建，保证参数指向当前 exe/data
-        let _ = run(&["/Delete", "/TN", TASK, "/F"]);
-        let create = format!(
-            "/Create /TN {TASK} /TR \"\\\"{}\\\" -data \\\"{}\\\"\" /SC ONSTART /RU SYSTEM /RL HIGHEST /F",
-            exe.display(),
-            data_dir.display()
-        );
-        let parts: Vec<&str> = create.split_whitespace().collect();
-        let out = run(&parts).map_err(|e| e.to_string())?;
-        if !out.contains("SUCCESS") {
-            return Err(format!("schtasks 失败: {}", out.trim()));
+        let _ = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")]);
+        let out = run(&create_args(&exe, data_dir))?;
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            let msg = msg.trim();
+            let msg = if msg.is_empty() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                msg.to_string()
+            };
+            return Err(format!("schtasks 失败: {msg}"));
         }
         Ok(())
     }
 
     pub fn note() -> &'static str {
         "Windows 计划任务 sing-box-panel（SYSTEM，开机启动，最高权限）"
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 回归：以前是「拼成一整串再 split_whitespace」，路径带空格时 /TR 会被拆成多个参数。
+        #[test]
+        fn create_args_keeps_path_with_spaces_whole() {
+            let args = create_args(
+                std::path::Path::new(r"C:\Program Files\panel\panel.exe"),
+                std::path::Path::new(r"C:\Program Files\panel\data"),
+            );
+            let i = args.iter().position(|a| a == "/TR").expect("/TR");
+            assert_eq!(
+                args[i + 1],
+                r#""C:\Program Files\panel\panel.exe" -data "C:\Program Files\panel\data""#
+            );
+            assert_eq!(args.len(), 12);
+            assert_eq!(args[0], "/Create");
+            assert_eq!(args.last().unwrap(), "/F");
+        }
     }
 }
 

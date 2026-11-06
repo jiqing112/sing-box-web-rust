@@ -121,6 +121,7 @@ impl Server {
             }
             Ok(Ok(())) => {
                 app.record_check(true);
+                app.clear_exit_ip().await;
                 json_ok(json!({"ok": true, "snapshots": app.store.snapshots()}))
             }
         }
@@ -164,7 +165,10 @@ impl Server {
                 app.failsafe_network().await;
                 err_json(StatusCode::BAD_REQUEST, "rollback_failed", &e.to_string())
             }
-            Ok(Ok(())) => json_ok(json!({"ok": true})),
+            Ok(Ok(())) => {
+                app.clear_exit_ip().await;
+                json_ok(json!({"ok": true}))
+            }
         }
     }
 
@@ -508,6 +512,7 @@ impl Server {
             }
             Ok(Ok(())) => {}
         }
+        app.clear_exit_ip().await;
 
         let host = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").split(':').next().unwrap_or("").to_string();
         let host = if host.is_empty() { "127.0.0.1".to_string() } else { host };
@@ -598,6 +603,7 @@ impl Server {
             }
             Ok(Ok(())) => {}
         }
+        app.clear_exit_ip().await;
         let tun_running = {
             let raw = app.store.config().unwrap_or_default();
             crate::config::inspect::tun_running(&raw, &app.engine_name())
@@ -741,6 +747,7 @@ impl Server {
             }
             Ok(Ok(())) => {}
         }
+        app.clear_exit_ip().await;
         json_ok(json!({"ok": true, "mode": mode, "name": Self::routing_mode_name(mode)}))
     }
 
@@ -906,6 +913,8 @@ impl Server {
 
         // 两个内核对 /proxies/{name}/delay 的测量口径不同，切完必须清掉。
         app.clash.reset_delays();
+        // 换了内核，出口 IP 一定变了。
+        app.clear_exit_ip().await;
 
         // 新内核的入站布局与旧的不同，透明代理规则必须重新核对。
         if prev_set.tproxy_enabled && tproxy::supported() {

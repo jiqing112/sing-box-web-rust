@@ -28,7 +28,7 @@ use crate::supervisor::Supervisor;
 use crate::tproxy;
 
 /// 面板版本。前端从 /status 读取。
-pub const VERSION: &str = "1.0.1";
+    pub const VERSION: &str = "1.1.0";
 
 /// 覆盖「校验 + 重启 + 探活」全过程；mihomo 首次校验会下载 geo 数据。
 pub const APPLY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -154,6 +154,7 @@ impl Server {
         Router::new()
             .route("/api/v1/auth/login", post(Self::h_login))
             .route("/api/v1/auth/status", get(Self::h_auth_status))
+            .route("/api/v1/auth/setup", post(Self::h_auth_setup))
             .route("/api/v1/auth/access", put(Self::h_auth_access))
             .route("/api/v1/auth/check", get(Self::h_check))
             .route("/api/v1/settings/listen", put(Self::h_listen_set))
@@ -217,6 +218,13 @@ impl Server {
         !set.username.is_empty() || !set.password_hash.is_empty()
     }
 
+    /// 全新面板、还没有任何登录凭据，需要用户在网页上完成首次账户设置。
+    /// 面板内「允许免密码访问」（login_disabled）优先于本状态。
+    pub(crate) fn needs_setup(&self) -> bool {
+        let set = self.store.settings();
+        !set.login_disabled && set.password_hash.is_empty()
+    }
+
     fn valid_token_string(&self, tok: &str) -> bool {
         if tok.is_empty() {
             return false;
@@ -240,8 +248,9 @@ impl Server {
     }
 
     /// 统一入口认证：返回 Some(resp) 表示未登录，直接回给客户端。
+    /// 待初始化（needs_setup）时同样全部拦截，逼出首次账户设置流程。
     pub(crate) fn authed(&self, headers: &HeaderMap) -> Option<Response> {
-        if self.login_required() && !self.valid_token(headers) {
+        if (self.login_required() || self.needs_setup()) && !self.valid_token(headers) {
             return Some(err_json(StatusCode::UNAUTHORIZED, "unauthorized", "未登录或登录已过期"));
         }
         None
@@ -249,7 +258,7 @@ impl Server {
 
     /// WebSocket 的认证：支持 Authorization 头或 ?token= 查询参数。
     pub(crate) fn authed_ws(&self, headers: &HeaderMap, query: &str) -> Option<Response> {
-        if !self.login_required() {
+        if !self.login_required() && !self.needs_setup() {
             return None;
         }
         if self.valid_token(headers) {
@@ -453,9 +462,46 @@ impl Server {
         let set = app.store.settings();
         json_ok(json!({
             "required": app.login_required(),
+            "needs_setup": app.needs_setup(),
             "username": set.username,
             "login_disabled": set.login_disabled,
         }))
+    }
+
+    /// 首次账户设置：只在「还没有任何凭据」时可用。设置完成后即成为常规登录态。
+    async fn h_auth_setup(State(app): State<Arc<Server>>, body: Bytes) -> Response {
+        if !app.needs_setup() {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                "already_setup",
+                "面板已完成初始化，请直接登录或在设置里修改",
+            );
+        }
+        let inb: Value = match parse_body(&body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        let username = inb
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let password = inb.get("password").and_then(|v| v.as_str()).unwrap_or("");
+        if username.is_empty() {
+            return err_json(StatusCode::BAD_REQUEST, "bad_request", "用户名不能为空");
+        }
+        if password.len() < 8 {
+            return err_json(StatusCode::BAD_REQUEST, "weak_password", "密码至少 8 位");
+        }
+        let mut set = app.store.settings();
+        set.username = username;
+        set.password_hash = Server::hash_password(&set.username, password);
+        set.login_disabled = false;
+        if let Err(e) = app.store.save_settings(set) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+        }
+        json_ok(json!({"ok": true, "required": true}))
     }
 
     async fn h_check(State(app): State<Arc<Server>>, headers: HeaderMap) -> Response {
@@ -475,7 +521,16 @@ impl Server {
             Err(resp) => return resp,
         };
         if !app.login_required() {
-            return err_json(StatusCode::BAD_REQUEST, "auth_disabled", "面板未启用登录");
+            let (code, kind, msg) = if app.needs_setup() {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "setup_required",
+                    "面板尚未初始化，请先设置登录账户密码",
+                )
+            } else {
+                (StatusCode::BAD_REQUEST, "auth_disabled", "面板未启用登录")
+            };
+            return err_json(code, kind, msg);
         }
         let ip = Server::client_ip(Some(connect_info.0));
         {
@@ -557,6 +612,13 @@ impl Server {
     }
 
     /* ------------------------------------------------------------ status / logs / service */
+
+    /// 出口 IP 缓存只在「什么都没变」的前提下才成立：切内核、切路由模式、
+    /// 改入站/局域网代理、应用或回滚配置、启停核心之后必须立刻失效，
+    /// 否则概览页会拿着旧的出口 IP 骗用户 60 秒。
+    pub(crate) async fn clear_exit_ip(&self) {
+        *self.exit_ip.lock().await = None;
+    }
 
     /// 当前出口 IP：面板经内核的 mixed 入站访问 IP 回显服务实测。
     /// 核心未运行或全部回显源失败时 ip 为 null；结果缓存 60 秒。
@@ -755,6 +817,8 @@ impl Server {
             app.failsafe_network().await;
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, "service_failed", &e);
         }
+        // 启停/重启核心都会换掉出口，缓存立即作废。
+        app.clear_exit_ip().await;
         json_ok(json!({"ok": true}))
     }
 
@@ -1054,6 +1118,23 @@ impl Server {
         let Ok(tags) = normalize_delay_tags(tags_in, &app.store.all_nodes()) else {
             return err_json(StatusCode::BAD_REQUEST, "no_tags", "没有可测速的节点");
         };
+        // 默认吃 5 分钟缓存：页面刷新、切页回来、脚本轮询都不该重新打一遍节点。
+        // 显式传 refresh=true（前端「强制重测」勾选框）才全部重测；
+        // 单节点「点一下测速」也是显式动作，前端固定传 refresh=true。
+        let refresh = inb.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false);
+        let (cached, todo): (Vec<(String, i64)>, Vec<String>) = if refresh {
+            (Vec::new(), tags.clone())
+        } else {
+            let mut cached = Vec::new();
+            let mut todo = Vec::new();
+            for tag in tags.iter() {
+                match app.clash.cached_delay(tag) {
+                    Some(ms) => cached.push((tag.clone(), ms)),
+                    None => todo.push(tag.clone()),
+                }
+            }
+            (cached, todo)
+        };
         let mut workers = app.store.settings().delay_workers;
         if workers <= 0 {
             workers = 3;
@@ -1061,15 +1142,15 @@ impl Server {
         if workers > 16 {
             workers = 16;
         }
-        if workers as usize > tags.len() {
-            workers = tags.len() as i64;
+        if workers as usize > todo.len() {
+            workers = todo.len() as i64;
         }
 
         // 固定 worker 并发（buffered 保持输入顺序），避免大订阅瞬间起上千协程
         use futures_util::StreamExt;
         let clash = app.clash.clone();
         let n = workers as usize;
-        let results: Vec<(String, i64)> = futures_util::stream::iter(tags.into_iter())
+        let measured: Vec<(String, i64)> = futures_util::stream::iter(todo.into_iter())
             .map(|tag| {
                 let clash = clash.clone();
                 async move {
@@ -1084,11 +1165,27 @@ impl Server {
             .buffered(n.max(1))
             .collect()
             .await;
+        // 结果按请求里的节点顺序拼回去：缓存命中的 + 本次实测的。
+        let measured_count = measured.len();
+        let cached_count = cached.len();
+        let mut merged: std::collections::HashMap<String, i64> = measured.into_iter().collect();
+        for (tag, ms) in cached {
+            merged.entry(tag).or_insert(ms);
+        }
+        let results: Vec<(String, i64)> = tags
+            .iter()
+            .map(|t| (t.clone(), *merged.get(t).unwrap_or(&-1)))
+            .collect();
         let arr: Vec<Value> = results
             .into_iter()
             .map(|(tag, ms)| json!({"tag": tag, "ms": ms}))
             .collect();
-        json_ok(json!({"results": arr, "delays": app.clash.delays_json()}))
+        json_ok(json!({
+            "results": arr,
+            "delays": app.clash.delays_json(),
+            "measured": measured_count,
+            "cached": cached_count,
+        }))
     }
 
     async fn h_toggle_node(

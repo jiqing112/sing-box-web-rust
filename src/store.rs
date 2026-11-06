@@ -436,12 +436,18 @@ impl Store {
                         }
                     }
                 }
-                return Err("not found".into());
+                return Err(snapshot_missing(self.settings().keep_snapshots, version));
             }
             return fs::read(self.dir.join("snapshots").join(&it.file)).map_err(|e| e.to_string());
         }
-        Err("not found".into())
+        Err(snapshot_missing(self.settings().keep_snapshots, version))
     }
+}
+
+/// 快照被 GC 后只返回 "not found" 的话，前端分不清是「版本已被回收」还是「文件坏了」。
+fn snapshot_missing(keep: i64, version: i64) -> String {
+    let keep = if keep <= 0 { 3 } else { keep };
+    format!("快照 v{version} 不存在：只保留最近 {keep} 份，更早的已被自动回收")
 }
 
 pub struct ErrNotFound;

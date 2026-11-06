@@ -60,6 +60,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex_encode(&h.finalize())
 }
 
+/// 取 md5 前 n 个 hex 字符。与 Go 版同名工具保持一致，
+/// 目前只在单测/后续协议（vmess shortId 一类）里用得到。
+#[allow(dead_code)]
 pub fn md5_hex_first(data: &[u8], n: usize) -> String {
     use md5::{Digest, Md5};
     let mut h = Md5::new();

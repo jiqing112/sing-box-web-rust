@@ -27,7 +27,8 @@ x86_64 / arm64 / mipsel(软浮点) 三架构可用。
 ./panel -data ./data -listen 0.0.0.0:9090 -password your-pass
 ```
 
-- 默认监听 `127.0.0.1:9090`，用户名 `admin`；不给 `-password` 会生成随机口令写入 `data/initial-password`。
+- 默认监听 `127.0.0.1:9090`；首次启动打开网页会要求设置登录账户密码，
+  `-password`/`PANEL_PASSWORD`/panel.conf 的 `password=` 提供密码则跳过网页初始化。
 - 双内核部署：把官方 `sing-box` / `mihomo` 放在面板同目录，或用 `-sing-box` / `-mihomo` 指定路径。
 - 全部命令行参数：`-data -listen -sing-box -mihomo -engine -clash -token -password -autostart`
   （兼容 `-flag v` 与 `--flag=v` 两种写法；`PANEL_TOKEN` / `PANEL_PASSWORD` 环境变量同样有效）。
@@ -46,6 +47,8 @@ x86_64 / arm64 / mipsel(软浮点) 三架构可用。
   按数据目录识别的孤儿清扫（Windows：PowerShell CIM + wmic 兜底；Linux：/proc 扫描）。
 - **Clash API 桥**：延迟测速（worker 池、TTL 缓存、切内核清零）、连接/流量 WebSocket
   （REST 轮询裁剪 200 条 + 2s 节流）、`/api/v1/clash/*` 白名单反代。
+  测速接口**默认命中 5 分钟缓存**（只实测缺失/过期的节点，响应里带 `measured`/`cached` 计数），
+  需要强制重测时传 `{"refresh": true}`；面板「节点」页的「强制重测」勾选框就是它。
 - **透明代理（Linux）**：nftables redirect + 局域网 DNS 劫持(53→5354) + 本机接管（cgroup v2 回环防护）、
   RFC1918 自动探测、下发前 preflight（nft -c 探测内核 redirect 能力）、
   「入站只绑回环」告警、核心停止/切换时自动撤规则防断网。
@@ -55,6 +58,8 @@ x86_64 / arm64 / mipsel(软浮点) 三架构可用。
   面板内关闭登录开关、`panel.conf` 忘密重置、登录哈希 sha256(user:pass)。
 - **运维**：配置快照（默认 3 份、孤儿 GC）、失败回滚、监听地址热切换（含同端口换绑回滚）、
   panel.conf 回写、systemd / OpenWrt procd / 计划任务开机自启（按 init 系统自动适配）、进程 RSS 上报（psapi / VmRSS）。
+- **Windows 托盘**：双击托盘图标打开网页配置，右键启停/重启核心、开机自启开关、优雅退出；
+  explorer 重启自动恢复图标，`-notray` 可关闭（unix 无此模块，零依赖零开销）。
 - **前端**：与 Go 版同一套 `web/dist`（无框架原生 JS），ETag 协商缓存 + SPA fallback，零改动复用。
 
 ## 与 Go 版的实现差异（不影响功能）
@@ -168,7 +173,7 @@ cd /tmp && sha256sum -c panel.tgz.sha256
 
 tar -xzf /tmp/panel.tgz -C /tmp && cd /tmp/sing-box-web-rust-1.0.1-linux-amd64
 ls
-# 预期: install.sh  mihomo  panel  panel.conf  README-linux.txt
+# 预期: install.sh  mihomo  panel  panel.bat  panel.conf  README-linux.txt
 #       README-windows.txt  sing-box  sing-box-panel.service  start.bat
 ```
 
@@ -196,8 +201,8 @@ sudo ./install.sh
   1. `panel.conf` 里写了 `password=xxx` → 用它；
   2. 启动参数 `-password xxx` 或环境变量 `PANEL_PASSWORD` → 用它；
   3. 都没给 → 自动生成随机密码，**安装输出里直接打印**，同时落在
-     `/opt/sing-box-panel/data/initial-password`。
-- 登录后请到「设置 → 访问控制」改掉密码，然后删掉 `initial-password` 文件。
+     打开网页按引导完成首次账户设置；或在 panel.conf 填 `password=` 后重启。
+- 登录后请到「设置 → 访问控制」改掉密码。
 - 忘记密码：编辑 `/opt/sing-box-panel/bin/panel.conf`，填上 `username=admin` 和
   新 `password=xxx`，`systemctl restart sing-box-panel` 即完成重置。
 
@@ -263,6 +268,8 @@ sudo rm -rf /opt/sing-box-panel
 | 订阅拉取报 403 | 机场按 UA 拦截：面板固定用 `clash-verge/v1.7.7` UA，一般不会；换个网络确认机场本身可达 |
 | 订阅刷新显示成功但节点没变 | 机场返回 204（内容未变化/限流），面板按「未变化」处理属正常行为 |
 | 测速全是 -1 | 所有节点超时（6 秒/个）：先确认概览页出口 IP 徽标；或机场节点本身不可用 |
+| 点测速秒回、数字没变 | 5 分钟内命中缓存属正常：勾选「强制重测」或传 `refresh:true` 才重新实测 |
+| 概览出口 IP 与实际不符 | 切路由模式/内核/启停核心会自动失效缓存；若刚在面板外改了系统代理，等 60 秒或刷新页面 |
 | **整网断网了** | 核心没跑但 redirect 规则还在（异常掉电等）：`nft delete table inet singbox` 立即恢复直连；正常关闭面板会自动撤表 |
 | 面板密码忘了 | 见 A3「忘记密码」 |
 
@@ -359,14 +366,29 @@ cd /mnt/usb/singbox && ./panel -data /mnt/usb/singbox/data -listen 0.0.0.0:9090 
 1. 解压 `*-windows-amd64.zip` 到任意目录（路径建议不要带中文）。
 2. 双击 `start.bat`（或命令行 `panel.exe -data .\panel-data -listen 0.0.0.0:9090 -password 你的密码`）。
 3. 浏览器 `http://127.0.0.1:9090`，按 A4 流程配置。
-4. **TUN 模式**：右键「以管理员身份运行」再启 start.bat；sing-box 需要 wintun.dll
-   （官方发行包自带；若 exe 同目录没有，请从 sing-box 官方发行包复制一份）。
-5. 开机自启：面板里开开关，自动注册 SYSTEM 计划任务 `sing-box-panel`（开机自动以最高权限启动）。
+4. **TUN 模式**：右键「以管理员身份运行」再启 start.bat。sing-box 1.14 起内核**自带 wintun**
+   （运行时解压到 `%TEMP%\wintun.zip`），发行包内也附带一份 `wintun.dll` 作兜底；
+   只有在内核很老、或 wintun 被安全软件清掉时，才需要从 sing-box 官方包手动补一个。
+5. 开机自启：面板里开开关，或跑 `panel.bat autostart-on`（非管理员自动弹 UAC）——
+   两者操作的是同一个 SYSTEM 计划任务 `sing-box-panel`，状态互通；
+   `/TR` 参数按数组直传，安装路径带空格也能正常注册。
+
+**系统托盘**（仅 Windows）：panel.exe 运行时任务栏右下角有绿菱形托盘图标——
+**双击打开网页配置**，右键菜单：打开面板 / 启动·停止·重启核心 / 开机自启开关 / 退出
+（退出与 Ctrl+C 同为优雅退出，自动停核心、撤代理规则）。托盘状态 3 秒刷新；
+不想要托盘用 `-notray` 启动。注意：以 SYSTEM 计划任务开机自启的面板运行在
+会话 0，没有桌面也就没有托盘，属正常现象。
+
+**panel.bat 管理脚本**：双击 = 智能默认——未运行则**后台隐藏启动**（无黑窗，
+仅托盘 + 自动开网页，脚本窗口自关），已运行则弹管理菜单。命令行直跑：
+`start`（前台）/ `startbg`（后台 + 托盘）/ `stop`（只停本数据目录的内核，
+不误伤其他实例）/ `restart` / `status` / `open` / `autostart-on|off` / `menu`。
+start.bat 双击同为后台常驻；两者脚本均为 GBK 编码（中文 Windows 默认控制台直接可用）。
 
 ### 首次登录与安全
 
 - 密码来源优先级：命令行 `-password` > 环境变量 `PANEL_PASSWORD` > `panel.conf` >
-  自动生成随机密码（写入 `data/initial-password`）。
+  全新面板未提供密码时进入网页首次初始化流程。
 - `panel.conf` 的 `username` 与 `password` **都留空** = 关闭登录（打开端口直接进首页），
   只在内网可信环境使用；只留空 password = 保持现有密码。
 - 面板自带登录限速（连续 5 次失败锁 30 秒，逐次翻倍至 15 分钟）与 Bearer token 会话（7 天）。
@@ -389,6 +411,12 @@ MIT，详见 [LICENSE](LICENSE)。`web/dist` 前端与 [`sing-box-web`](https://
 
 ## 实测记录（本仓库开发期）
 
+- Windows x64（sing-box 1.14.3 / mihomo 1.19.33，真实机场订阅 28 个 vless 节点，2026-11 全量回归）：
+  登录/限速、订阅解析与自动更新（回拨 `updated_at` 后 60 s 内自动刷新）、渲染/check/apply、
+  rule|global|direct 三模式真实出网（出口 MY，百度直连）、TUN 双内核（`singbox-tun` / `mihomo-tun`）、
+  局域网 SOCKS/HTTP 鉴权（407 / SOCKS 拒绝）、WS 流量与连接、双内核切换（1.0–1.3 s）、
+  快照回滚、监听热切换、孤儿清扫（清掉残留内核且不误杀其他代理实例）、崩溃自动拉起；
+  面板**冷启动 167 ms 即可访问**（进程清扫放后台），内核随后自动拉起。
 - Windows 11 x64（sing-box 1.14.3 / mihomo 1.19.33，mock 本地内核 + 真实机场订阅数据迁移）：
   登录/限速、订阅解析（Clash YAML + Base64 URI）、渲染、check、apply、重启、
   真实 56 节点代理 204（0.25 s）、WS traffic/connections、TUN 开关（管理员）、

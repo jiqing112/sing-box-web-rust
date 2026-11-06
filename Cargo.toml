@@ -30,6 +30,16 @@ libc = "0.2"
 # Linux 上走 rustls（ring），musl 静态链接友好。
 [target.'cfg(windows)'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+# 托盘用：0.52 已是传递依赖（vendor 内现成），声明直接依赖零新增下载
+windows-sys = { version = "0.52", features = [
+  "Win32_Foundation",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+] }
 
 [profile.release]
 opt-level = "z"

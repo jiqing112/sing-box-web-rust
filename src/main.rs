@@ -15,6 +15,8 @@ mod store;
 mod subscription;
 mod supervisor;
 mod supervisor_sys;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod tray;
 mod tproxy;
 mod util;
 mod webfs;
@@ -39,6 +41,8 @@ mod clapless {
         pub token: Option<String>,
         pub password: Option<String>,
         pub autostart_explicit: Option<bool>,
+        /// Windows 托盘开关：-notray 关闭（会话 0 / unix 自动无托盘）
+        pub notray: bool,
     }
 
     impl Args {
@@ -53,6 +57,7 @@ mod clapless {
                 token: None,
                 password: None,
                 autostart_explicit: None,
+                notray: false,
             };
             let argv: Vec<String> = std::env::args().skip(1).collect();
             let mut i = 0;
@@ -91,10 +96,12 @@ mod clapless {
                             .unwrap_or(true);
                         a.autostart_explicit = Some(v);
                     }
+                    "notray" => a.notray = true,
                     "h" | "help" => {
                         eprintln!(
                             "用法: panel [-data 目录] [-listen host:port] [-sing-box 路径] [-mihomo 路径] \
-                             [-engine sing-box|mihomo] [-clash host:port] [-token 令牌] [-password 密码] [-autostart true|false]"
+                             [-engine sing-box|mihomo] [-clash host:port] [-token 令牌] [-password 密码] \
+                             [-autostart true|false] [-notray]"
                         );
                         std::process::exit(0);
                     }
@@ -237,22 +244,15 @@ fn clean_path(p: &Path) -> PathBuf {
     PathBuf::from(result)
 }
 
-fn random_pass() -> String {
-    crate::util::rand_hex(9)
-}
-
 fn login_hash(user: &str, pass: &str) -> String {
     crate::util::sha256_hex(format!("{user}:{pass}").as_bytes())
 }
 
-/// 把 panel.conf/启动参数里的账户密码落到 settings。语义与 Go 版一致：
-/// 显式留空两项=关闭登录；只留空 password=保持现有密码；改用户名必须同时给密码。
-fn apply_login_conf(
-    settings: &mut model::Settings,
-    conf: &panelconf::PanelConf,
-    flag_pass: &str,
-    data_dir: &Path,
-) {
+/// 把 panel.conf/启动参数里的账户密码落到 settings。
+/// 全新面板（无密码哈希）且没有提供密码时保持「待初始化」状态，由用户
+/// 在网页上完成首次账户设置，不再自动生成随机密码；提供密码则直接应用
+/// （自动化部署路径）。关闭登录只能用面板内开关，panel.conf 不再承担。
+fn apply_login_conf(settings: &mut model::Settings, conf: &panelconf::PanelConf, flag_pass: &str) {
     let mut pass = flag_pass.to_string();
     if pass.is_empty() {
         pass = conf.password.clone();
@@ -262,30 +262,13 @@ fn apply_login_conf(
         user = conf.username.clone();
     }
 
-    // 命令行/环境变量显式给了密码时仍以密码为准，不关闭登录。
-    if flag_pass.is_empty() && conf.login_disabled() {
-        if !settings.username.is_empty() || !settings.password_hash.is_empty() {
-            eprintln!("面板登录已关闭（panel.conf 的 username 与 password 均为空）");
-        }
-        settings.username = String::new();
-        settings.password_hash = String::new();
-        settings.login_disabled = true;
-        return;
-    }
-
     if settings.password_hash.is_empty() {
-        // 已处于免登录状态，本次又没提供密码：保持关闭，避免突然生成随机密码。
-        if settings.username.is_empty() && pass.is_empty() {
-            settings.login_disabled = true;
-            if !conf.username.is_empty() {
-                eprintln!("panel.conf 只填写了用户名、未填写 password，登录保持关闭");
-            }
-            return;
-        }
+        // 全新面板：没有密码就交给网页初始化流程（needs_setup），
+        // conf/参数预填的用户名保留下来作为默认值。
         if pass.is_empty() {
-            pass = random_pass();
-            let _ = std::fs::write(data_dir.join("initial-password"), format!("{pass}\n"));
-            eprintln!("初始密码已写入 {}", data_dir.join("initial-password").display());
+            settings.username = user;
+            settings.login_disabled = false;
+            return;
         }
         if user.is_empty() {
             user = "admin".into();
@@ -296,12 +279,13 @@ fn apply_login_conf(
         return;
     }
     if pass.is_empty() {
+        // 已有账户且未提供新密码：保持现状
         if !conf.username.is_empty() && user != settings.username {
             eprintln!("panel.conf 修改了用户名但未填 password，已忽略（改用户名需同时填写 password）");
         }
         return;
     }
-    // 提供密码即视为要恢复登录，即使密码与原有哈希相同也要清掉开关。
+    // 提供密码即视为要更新凭据，即使密码与原有哈希相同也要清掉免密开关。
     settings.login_disabled = false;
     let hash = login_hash(&user, &pass);
     if hash != settings.password_hash {
@@ -391,7 +375,7 @@ async fn run() -> i32 {
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| env("PANEL_PASSWORD"));
-    apply_login_conf(&mut settings, &conf, &flag_pass, &data_dir);
+    apply_login_conf(&mut settings, &conf, &flag_pass);
     // 已有配置但没有版本号（从旧版本升级）时，从 1 起算
     if settings.config_version == 0 {
         if let Ok(raw) = st.config() {
@@ -409,11 +393,16 @@ async fn run() -> i32 {
     }
 
     let sup = supervisor::Supervisor::new(Path::new(&core_bin), &st.config_path(), &eng);
-    // 上次面板被强杀时，子核心会变成孤儿并一直占着 cache.db/9091，
-    // 必须在探活和自动启动之前清掉。两个内核都扫一遍。
-    for b in bins.values() {
-        supervisor::sweep_orphans(b, &data_dir);
-    }
+    // 上次面板被强杀时，子核心会变成孤儿并一直占着 cache.db/9091。
+    // 清扫要起 PowerShell 查进程（冷启动 8–10 秒），所以丢到后台跑：
+    // 面板先把端口监听起来，用户打开浏览器立刻能进页面。
+    // 两个内核合并成一次查询；清扫结果必须在自动启动核心之前等到，
+    // 否则孤儿占着 9091 会让探活误判成「已有内核在跑」而跳过启动。
+    let sweep_bins: Vec<String> = bins.values().cloned().collect();
+    let sweep_dir = data_dir.clone();
+    let sweep = tokio::task::spawn_blocking(move || {
+        supervisor::sweep_orphans(&sweep_bins, &sweep_dir);
+    });
 
     // TUN 入站需要管理员令牌。非管理员启动时自动降级为无 TUN 配置并关掉开关。
     if settings.tun_enabled && !platform::tun_supported() {
@@ -448,6 +437,36 @@ async fn run() -> i32 {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| env("PANEL_TOKEN"));
     let app = api::Server::new(st.clone(), sup.clone(), cl.clone(), bins.clone(), &static_token, tp.clone());
+
+    // 先把 HTTP 服务拉起来：孤儿清扫、自动启动核心都不该挡住面板本身。
+    let router = app.router();
+    {
+        let mut g = app.router.write().unwrap();
+        *g = Some(router.clone());
+    }
+    let lm = match listen::ListenManager::new(&listen_addr, router).await {
+        Ok(lm) => lm,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    {
+        let mut g = app.listen.lock().await;
+        *g = Some(lm);
+    }
+    app.listen_pinned
+        .store(listen_pinned, std::sync::atomic::Ordering::Relaxed);
+    api::register_global(app.clone());
+    eprintln!(
+        "panel listening on {listen_addr} (data={}, engine={eng}, bin={core_bin})",
+        data_dir.display()
+    );
+
+    // 清扫完成后再决定要不要拉起核心（探活不能被残留进程带偏）。
+    if let Err(e) = sweep.await {
+        eprintln!("清理残留内核失败: {e}");
+    }
 
     // 自动启动核心：先探活再决定，避免端口冲突导致启动失败。
     if args.autostart_explicit.unwrap_or(true) {
@@ -528,31 +547,31 @@ async fn run() -> i32 {
 
     app.start_scheduler();
 
-    let router = app.router();
-    {
-        let mut g = app.router.write().unwrap();
-        *g = Some(router.clone());
-    }
-    let lm = match listen::ListenManager::new(&listen_addr, router).await {
-        Ok(lm) => lm,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
+    // 系统托盘（仅 Windows；-notray / 会话 0 SYSTEM 自启时自动跳过）。
+    // 必须放在监听起来之后：托盘的 tooltip/菜单要展示真实端口。
+    let mut tray = if args.notray {
+        None
+    } else {
+        tray::spawn(tray::TrayState {
+            listen: listen_addr.clone(),
+            core_running: sup.running(),
+            autostart: platform::autostart_enabled().unwrap_or(false),
+        })
     };
-    {
-        let mut g = app.listen.lock().await;
-        *g = Some(lm);
+    if let Some((handle, _)) = &tray {
+        let sync_handle = handle.clone();
+        let sync_sup = sup.clone();
+        let sync_st = st.clone();
+        tokio::spawn(sync_tray_state(sync_handle, sync_sup, sync_st));
     }
-    app.listen_pinned
-        .store(listen_pinned, std::sync::atomic::Ordering::Relaxed);
-    api::register_global(app.clone());
-    eprintln!(
-        "panel listening on {listen_addr} (data={}, engine={eng}, bin={core_bin})",
-        data_dir.display()
-    );
 
-    wait_for_signal().await;
+    // 等待退出：Ctrl+C / SIGTERM / 托盘「退出」；托盘菜单的启停/自启就地处理
+    wait_for_exit(&sup, &mut tray, &data_dir).await;
+
+    // 优雅退出序列与 Ctrl+C 完全一致：关监听 → 杀核心树 → 撤透明代理规则
+    if let Some((handle, _)) = tray.as_ref() {
+        handle.remove();
+    }
 
     {
         let mut g = app.listen.lock().await;
@@ -572,9 +591,19 @@ async fn run() -> i32 {
     0
 }
 
-async fn wait_for_signal() {
+/// 等待退出信号：unix 是 SIGTERM/SIGINT；Windows 上额外处理托盘菜单事件
+/// （启停/重启核心、开机自启切换、退出），返回即进入统一退出序列。
+async fn wait_for_exit(
+    sup: &Arc<supervisor::Supervisor>,
+    tray: &mut Option<(
+        tray::TrayHandle,
+        tokio::sync::mpsc::UnboundedReceiver<tray::TrayEvent>,
+    )>,
+    data_dir: &Path,
+) {
     #[cfg(unix)]
     {
+        let _ = (sup, tray, data_dir);
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
         let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
@@ -585,6 +614,80 @@ async fn wait_for_signal() {
     }
     #[cfg(windows)]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        let (handle, rx) = match tray {
+            Some((h, r)) => (h, r),
+            None => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return,
+                ev = rx.recv() => match ev {
+                    None => {
+                        // 托盘线程已退出（图标被收走等）：没有可等的事件了，
+                        // 退化为只等 Ctrl+C，避免 select 立即触发误退出。
+                        let _ = tokio::signal::ctrl_c().await;
+                        return;
+                    }
+                    Some(tray::TrayEvent::Exit) => return,
+                    Some(tray::TrayEvent::CoreToggle) => {
+                        if sup.running() {
+                            if let Err(e) = sup.stop().await {
+                                eprintln!("托盘停止核心失败: {e}");
+                            }
+                        } else if let Err(e) = sup.start() {
+                            eprintln!("托盘启动核心失败: {e}");
+                        }
+                        handle.update(|s| s.core_running = sup.running());
+                    }
+                    Some(tray::TrayEvent::CoreRestart) => {
+                        if let Err(e) = sup.restart().await {
+                            eprintln!("托盘重启核心失败: {e}");
+                        }
+                        handle.update(|s| s.core_running = sup.running());
+                    }
+                    Some(tray::TrayEvent::AutostartToggle) => {
+                        let on = !platform::autostart_enabled().unwrap_or(false);
+                        match platform::set_autostart(on, data_dir) {
+                            Ok(()) => eprintln!(
+                                "开机自启已{}（{}）",
+                                if on { "开启" } else { "关闭" },
+                                platform::autostart_note()
+                            ),
+                            Err(e) => eprintln!("切换开机自启失败: {e}"),
+                        }
+                        handle.update(|s| s.autostart = platform::autostart_enabled().unwrap_or(on));
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// 把核心运行态/监听地址/自启开关同步进托盘（tooltip 与菜单勾选态）。
+/// sup.running() 与 settings() 都是内存读，轮询零成本；自启查询要起
+/// schtasks 子进程，放宽到 30 秒一次。
+async fn sync_tray_state(
+    handle: tray::TrayHandle,
+    sup: Arc<supervisor::Supervisor>,
+    st: Arc<store::Store>,
+) {
+    let mut n: u32 = 0;
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+        let core_running = sup.running();
+        let listen = st.settings().listen;
+        let check_autostart = n % 10 == 0;
+        n = n.wrapping_add(1);
+        handle.update(|s| {
+            s.core_running = core_running;
+            s.listen = listen.clone();
+            if check_autostart {
+                s.autostart = platform::autostart_enabled().unwrap_or(s.autostart);
+            }
+        });
     }
 }

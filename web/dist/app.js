@@ -21,7 +21,10 @@ const state = {
   traffic: { up: 0, down: 0, upHist: [], downHist: [] },
   paused: false,
   page: 'dashboard',
-  testRunning: false
+  testRunning: false,
+  // 运行时按需填充的接口数据（初始声明便于阅读与调试）
+  tproxy: null, tun: null, lanproxy: null, routing: null,
+  autostart: null, geo: null
 };
 
 let pollTimers = [];
@@ -170,8 +173,8 @@ function confirmDialog({ title, body, confirm = '确认', danger = false }) {
     dialogResolve = resolve;
     $('#dialog').innerHTML = `
       <div class="dialog-hd">
-        <h3>${danger ? '<svg width="15" height="15" style="color:var(--red)"><use href="#i-alert"/></svg>' : ''}${esc(title)}</h3>
-        <p>${body}</p>
+        <h3>${danger ? '<svg width="15" height="15"><use href="#i-alert"/></svg>' : ''}${esc(title)}</h3>
+        ${body ? `<p>${body}</p>` : ''}
       </div>
       <div class="dialog-ft">
         <button class="btn" id="dlgCancel">取消</button>
@@ -197,7 +200,7 @@ function authCredDialog(defaultUser) {
     $('#dialog').innerHTML = `
       <div class="dialog-hd">
         <h3>启用登录</h3>
-        <p>设置新的登录账户与密码（至少 8 位）。保存后其他已登录会话会失效。</p>
+        <p>保存后其他已登录会话会失效。</p>
       </div>
       <div class="dialog-bd">
         <div class="field"><label>用户名</label><input class="input" id="authUserInput" value="${esc(defaultUser || 'admin')}" autocomplete="off" /></div>
@@ -242,9 +245,24 @@ async function login(user, pass) {
 }
 
 function showLogin() {
+  state.setupMode = false;
   $('#app').style.display = 'none';
   $('#login').classList.add('open');
+  $('#loginBtn').textContent = '登录';
+  $('#loginPass2Field').style.display = 'none';
+  $('#loginErr').textContent = '';
   setTimeout(() => $('#loginPass')?.focus(), 200);
+}
+
+// 首次启动初始化：复用登录页，多一个确认密码框，提交走 /auth/setup
+function showSetup() {
+  state.setupMode = true;
+  $('#app').style.display = 'none';
+  $('#login').classList.add('open');
+  $('#loginBtn').textContent = '完成初始化';
+  $('#loginPass2Field').style.display = '';
+  $('#loginErr').textContent = '';
+  setTimeout(() => $('#loginUser')?.focus(), 200);
 }
 
 function logout() {
@@ -271,7 +289,18 @@ $('#loginForm').addEventListener('submit', async (e) => {
   btn.disabled = true;
   $('#loginErr').textContent = '';
   try {
-    await login($('#loginUser').value.trim(), $('#loginPass').value);
+    if (state.setupMode) {
+      const user = $('#loginUser').value.trim();
+      const pass = $('#loginPass').value;
+      if (!user) { $('#loginErr').textContent = '请填写用户名'; return; }
+      if (pass.length < 8) { $('#loginErr').textContent = '密码至少 8 位'; return; }
+      if (pass !== $('#loginPass2').value) { $('#loginErr').textContent = '两次输入的密码不一致'; return; }
+      await api('/api/v1/auth/setup', { method: 'POST', body: JSON.stringify({ username: user, password: pass }) });
+      state.setupMode = false;
+      await login(user, pass);
+    } else {
+      await login($('#loginUser').value.trim(), $('#loginPass').value);
+    }
     await boot();
   } catch (err) {
     $('#loginErr').textContent = err.message;
@@ -369,7 +398,7 @@ function renderStatus() {
   $('#heroGlyph').style.background = running ? 'var(--lime-soft)' : 'rgba(255,111,97,.1)';
   $('#heroGlyph').style.color = running ? 'var(--lime)' : 'var(--red)';
   $('#heroGlyph').style.borderColor = running ? 'var(--lime-line)' : 'rgba(255,111,97,.3)';
-  $('#heroUptime').textContent = fmtUptime(s.uptime);
+  $('#heroUptime').textContent = running ? fmtUptime(s.uptime) : '未运行';
   $('#heroPid').textContent = s.pid ? `PID ${s.pid}` : 'PID —';
   $('#heroCheck').textContent = s.last_check_at
     ? (s.last_check_ok ? `校验通过 · ${fmtAgo(s.last_check_at)}` : `校验失败 · ${fmtAgo(s.last_check_at)}`)
@@ -377,13 +406,7 @@ function renderStatus() {
   $('#heroNodes').textContent = s.enabled;
   $('#heroRules').textContent = s.rules;
   const mixedPort = s.mixed_port || 7890;
-  const mixedListen = s.mixed_listen || '127.0.0.1';
   $('#heroIn').textContent = `mixed :${mixedPort}`;
-  $('#mixedHint').textContent = `${mixedListen}:${mixedPort}`;
-
-  $('#dashDesc').textContent = running
-    ? `${s.version || eng()} 正在运行，${s.enabled} 个出站节点已下发，配置版本 v${s.config_version}。`
-    : '核心未运行。请到「服务」页启动，或先到「配置」页生成并下发配置。';
 
   // memory（首页的内存环已移除，只保留设置页与「服务」页的两处数字）
   const panelMB = (s.panel_rss || 0) / 1048576;
@@ -393,24 +416,8 @@ function renderStatus() {
 
   // stats
   $('#statNodes').innerHTML = `${s.enabled}<small>/ ${s.nodes}</small>`;
-  $('#statNodesFoot').textContent = s.nodes - s.enabled > 0 ? `${s.nodes - s.enabled} 个节点已禁用` : '全部节点已启用';
+  $('#statNodesFoot').textContent = s.nodes - s.enabled > 0 ? `${s.nodes - s.enabled} 个已禁用` : '';
   $('#statRules').textContent = s.rules;
-  $('#statRulesFoot').textContent = 'final → proxy';
-
-  $('#flowRules').textContent = `${s.rules} rules`;
-  // 优先显示 Clash API 里 selector 实际选中的出站，而不是「延迟最低」的推测
-  const nowTag = s.active || Object.keys(state.delays)
-    .sort((a, b) => {
-      const av = state.delays[a].ms > 0 ? state.delays[a].ms : 1e9;
-      const bv = state.delays[b].ms > 0 ? state.delays[b].ms : 1e9;
-      return av - bv;
-    })[0];
-  if (nowTag) {
-    $('#flowNow').textContent = stripFlag(nowTag);
-    $('#flowNow').title = nowTag;
-    const d = state.delays[nowTag];
-    $('#flowNowMs').textContent = d ? (d.ms > 0 ? `${d.ms} ms` : '超时') : '';
-  }
 
   // service page
   $('#svcState').textContent = running ? 'running' : 'stopped';
@@ -418,7 +425,7 @@ function renderStatus() {
   $('#svcDot').className = 'dot ' + (running ? 'live' : '');
   $('#svcPid').textContent = s.pid ? `PID ${s.pid}` : 'PID —';
   $('#svcUptime').textContent = running ? fmtUptime(s.uptime) : (s.last_error || '未运行');
-  $('#svcRss').innerHTML = `${coreMB.toFixed(1)}<small style="font-size:11px;color:var(--text-3)"> MB</small>`;
+  $('#svcRss').innerHTML = `${coreMB.toFixed(1)}<small> MB</small>`;
   $('#svcMemBar').style.width = Math.min(100, coreMB / 2) + '%';
   $('#svcMemNote').textContent = `面板 ${panelMB.toFixed(1)} MB · 核心 ${coreMB.toFixed(0)} MB`;
   $('#svcCfgVer').textContent = `v${s.config_version}`;
@@ -434,9 +441,11 @@ function renderStatus() {
     : s.listen.split(':')[0];
   const loopback = listenHost === '127.0.0.1' || listenHost === '::1' || listenHost === 'localhost';
   const listenNote = $('#setListenNote');
+  // 只在有话要说时出现：启动参数固定了监听地址这一事实会影响面板内修改的效果
+  listenNote.style.display = s.listen_pinned ? '' : 'none';
   listenNote.textContent = s.listen_pinned
     ? '启动参数 -listen 已固定监听地址，重启后以该参数为准'
-    : '修改后立即切换监听并写入 panel.conf';
+    : '';
   listenNote.style.color = s.listen_pinned ? 'var(--amber)' : '';
   $('#setListen2').textContent = listenHost || '0.0.0.0';
   $('#listenWarn').style.display = loopback ? 'none' : '';
@@ -461,8 +470,6 @@ function renderStatus() {
   $('#setPlatform').textContent = s.arch || '—';
   $('#paletteVer').textContent = s.panel_version ? `sing-box panel v${s.panel_version}` : 'sing-box panel';
   $('#workersChip').textContent = `并发上限 ${s.delay_workers ?? 3}`;
-  $('#delayTtlNote').textContent = s.delay_ttl ?? 300;
-  $('#snapLimit').textContent = s.keep_snapshots ?? 3;
   $('#tpCore').textContent = running ? '运行中' : '未运行';
   $('#tpMode').textContent = s.tproxy || 'redirect';
 
@@ -477,22 +484,12 @@ function renderStatus() {
   $('#navTpLabel').textContent = linux ? '透明代理' : 'TUN 模式';
   $('#dashTpLabel').textContent = linux ? '透明代理' : 'TUN 模式';
   $('#tpTitle').textContent = linux ? '透明代理' : 'TUN 模式';
-  $('#tpDesc').textContent = linux
-    ? 'nftables redirect 接管局域网 TCP 流量；客户端网关指向本机即可生效。'
-    : 'TUN 虚拟网卡接管整机流量（含不走系统代理的程序）；需要管理员身份运行。';
   // 流量接管卡：redirect 行仅 Linux 显示，TUN 行两平台都有
   $('#redirectRow').style.display = linux ? '' : 'none';
   $('#redirectDivider').style.display = linux ? '' : 'none';
   $('#nftPreview').style.display = linux ? '' : 'none';
-  $('#tpWinInfo').style.display = linux ? 'none' : '';
-  if ($('#tpTakeoverSub')) {
-    $('#tpTakeoverSub').textContent = linux ? 'redirect（局域网）与 TUN（本机）独立开关，可同时启用' : '虚拟网卡接管整机流量';
-  }
-  if ($('#tpTakeoverNote')) {
-    $('#tpTakeoverNote').textContent = linux
-      ? 'redirect 只接管 TCP，目标为内网的流量直接放行；两个通道可同时开启——本机流量走 TUN，局域网设备走 redirect。切换任意开关都会重新渲染配置并重启核心（约 1 秒），失败自动回滚。'
-      : 'TUN 接管所有程序的流量，与系统代理可共存。切换开关会重新渲染配置并重启核心（约 1 秒），失败自动回滚。';
-  }
+  // Windows 下右列（nftables 预览）不存在，网格退化为单列避免大片留白
+  $('#page-tproxy .grid-2').style.gridTemplateColumns = linux ? '' : '1fr';
 
   // traffic stat
   renderTrafficStats();
@@ -506,8 +503,7 @@ function renderSubs() {
     grid.innerHTML = `
       <button class="sub-add" id="emptyAddSub">
         <span class="plus"><svg width="14" height="14"><use href="#i-plus"/></svg></span>
-        还没有订阅，点击添加
-        <span style="font-size:10.5px;color:var(--text-4)">Clash / sing-box / v2ray 格式</span>
+        添加订阅
       </button>`;
     $('#emptyAddSub').onclick = openAddSub;
     return;
@@ -520,11 +516,11 @@ function renderSubs() {
     return `<div class="card sub-card">
       <div class="sub-head">
         <div class="sub-avatar ${tones[i % 3]}">${esc(s.name.slice(0, 1).toUpperCase())}</div>
-        <div style="min-width:0;flex:1">
+        <div class="sub-id">
           <div class="sub-title">${esc(s.name)}</div>
           <div class="sub-url" title="${esc(s.url)}">${esc(s.url)}</div>
         </div>
-        <span class="badge ${s.auto ? 'lime' : ''}" style="height:18px">${s.auto ? `自动 · ${hours}h` : '手动'}</span>
+        <span class="badge ${s.auto ? 'lime' : ''}">${s.auto ? `自动 · ${hours}h` : '手动'}</span>
       </div>
       <div class="usage">
         <div class="usage-bar"><i style="width:${pct}%"></i></div>
@@ -537,7 +533,7 @@ function renderSubs() {
       </div>
       <div class="sub-schedule">
         <div>
-          <button class="switch sm ${s.auto ? 'on' : ''}" data-auto="${s.id}" title="${s.auto ? '关闭自动更新' : '开启自动更新'}"></button>
+          <button class="switch sm ${s.auto ? 'on' : ''}" data-auto="${s.id}" role="switch" aria-checked="${!!s.auto}" title="${s.auto ? '关闭自动更新' : '开启自动更新'}"></button>
           <span class="k">自动更新</span>
         </div>
         <div>
@@ -547,11 +543,11 @@ function renderSubs() {
           <button class="btn ghost xs" data-save-hours="${s.id}" ${s.auto ? '' : 'disabled'}>保存</button>
         </div>
       </div>
-      <div style="display:flex;gap:6px">
-        <button class="btn sm" style="flex:1" data-refresh="${s.id}"><svg width="11" height="11"><use href="#i-refresh"/></svg>立即更新</button>
-        <button class="btn sm ghost" data-del="${s.id}" title="删除"><svg width="11" height="11"><use href="#i-trash"/></svg></button>
+      <div class="sub-actions">
+        <button class="btn sm grow" data-refresh="${s.id}"><svg width="11" height="11"><use href="#i-refresh"/></svg>立即更新</button>
+        <button class="btn sm ghost" data-del="${s.id}" title="删除" aria-label="删除"><svg width="11" height="11"><use href="#i-trash"/></svg></button>
       </div>
-      ${s.last_error ? `<div class="callout danger" style="padding:8px 10px;font-size:11px"><svg width="13" height="13"><use href="#i-alert"/></svg><div>${esc(s.last_error)}</div></div>` : ''}
+      ${s.last_error ? `<div class="callout danger callout-sm"><svg width="13" height="13"><use href="#i-alert"/></svg><div>${esc(s.last_error)}</div></div>` : ''}
     </div>`;
   }).join('');
 
@@ -604,7 +600,7 @@ async function refreshSub(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
   try {
     const d = await api(`/api/v1/subscriptions/${id}/refresh`, { method: 'POST' });
-    toast('ok', '更新完成', `解析出 ${d.nodes} 个节点，原始响应已丢弃`);
+    toast('ok', '更新完成', `解析出 ${d.nodes} 个节点`);
     await Promise.all([loadSubs(), loadNodes()]);
     renderSubs(); renderNodes(); renderStatus();
   } catch (e) {
@@ -617,14 +613,13 @@ async function refreshSub(id, btn) {
 async function deleteSub(id) {
   const ok = await confirmDialog({
     title: '删除这个订阅？',
-    body: '订阅元数据与解析出的节点会一并移除。已经下发的配置不会自动变更。',
     confirm: '删除订阅',
     danger: true
   });
   if (!ok) return;
   try {
     await api(`/api/v1/subscriptions/${id}`, { method: 'DELETE' });
-    toast('info', '订阅已删除', 'subs.json 已原子更新');
+    toast('info', '订阅已删除');
     await Promise.all([loadSubs(), loadNodes()]);
     renderSubs(); renderNodes(); renderStatus();
   } catch (e) {
@@ -636,7 +631,6 @@ function openAddSub() {
   $('#dialog').innerHTML = `
     <div class="dialog-hd">
       <h3>新增订阅</h3>
-      <p>支持 Clash / sing-box / v2ray 订阅格式。原始响应解析后即丢弃，仅保留节点。</p>
     </div>
     <div class="dialog-bd">
       <div class="field"><label>订阅名称</label><input class="input" id="subName" placeholder="例如：主订阅" /></div>
@@ -644,12 +638,10 @@ function openAddSub() {
       <div class="field">
         <label>自动更新</label>
         <div class="form-switch">
-          <button type="button" class="switch sm on" id="subAuto" aria-pressed="true"></button>
-          <span>开启后按设定间隔自动重新拉取</span>
+          <button type="button" class="switch sm on" id="subAuto" role="switch" aria-checked="true"></button>
+          <span class="k">每 <input class="input sub-hours" id="subHours" type="number" min="1" max="720" step="1" value="24" /> 小时</span>
         </div>
       </div>
-      <div class="field"><label>更新间隔（小时）</label><input class="input" id="subHours" type="number" min="1" max="720" step="1" value="24" /></div>
-      <div class="callout"><svg width="14" height="14"><use href="#i-info"/></svg><div>拉取使用 Clash UA，8 MB 上限，20 秒超时。间隔范围 1–720 小时。</div></div>
     </div>
     <div class="dialog-ft">
       <button class="btn" onclick="closeDialog(false)">取消</button>
@@ -660,7 +652,7 @@ function openAddSub() {
   const hoursInput = $('#subHours');
   autoBtn.onclick = () => {
     const on = autoBtn.classList.toggle('on');
-    autoBtn.setAttribute('aria-pressed', String(on));
+    autoBtn.setAttribute('aria-checked', String(on));
     hoursInput.disabled = !on;
   };
   $('#subOk').onclick = async () => {
@@ -720,7 +712,7 @@ function renderNodes() {
   const rows = filteredNodes();
   const tbody = $('#nodeTable tbody');
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:44px;color:var(--text-4)">
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">
       ${state.nodes.length ? '没有匹配的节点' : '还没有节点，先去「订阅」页添加订阅'}</td></tr>`;
   } else {
     tbody.innerHTML = rows.map((n) => {
@@ -733,9 +725,9 @@ function renderNodes() {
           <div class="col"><div class="t">${esc(stripFlag(n.name))}</div><div class="s">${esc(n.sub_id.slice(-6))}</div></div>
         </div></td>
         <td><span class="badge mono p-${esc(n.type)}">${esc(n.type)}</span></td>
-        <td><div class="s" style="font-family:var(--mono);font-size:11px;color:var(--text-3)">${esc(n.server)}:${n.port}</div></td>
+        <td><div class="cell-addr">${esc(n.server)}:${n.port}</div></td>
         <td><span class="lat ${c}">${latText(ms)}</span></td>
-        <td><button class="switch sm ${n.enabled ? 'on' : ''}" data-toggle="${n.id}"></button></td>
+        <td><button class="switch sm ${n.enabled ? 'on' : ''}" data-toggle="${n.id}" role="switch" aria-checked="${!!n.enabled}"></button></td>
         <td class="t-right"><button class="btn ghost xs" data-ping="${esc(n.tag)}">测速</button></td>
       </tr>`;
     }).join('');
@@ -756,7 +748,8 @@ async function toggleNode(id, btn) {
     await api(`/api/v1/nodes/${id}`, { method: 'PUT', body: JSON.stringify({ enabled: next }) });
     node.enabled = next;
     btn.classList.toggle('on', next);
-    toast(next ? 'ok' : 'info', next ? '节点已启用' : '节点已禁用', `${node.name} · 重新渲染配置后生效`);
+    btn.setAttribute('aria-checked', String(next));
+    toast(next ? 'ok' : 'info', next ? '节点已启用' : '节点已禁用', node.name);
     await pollStatus();
   } catch (e) {
     toast('err', '操作失败', e.message);
@@ -766,7 +759,8 @@ async function toggleNode(id, btn) {
 async function testOne(tag) {
   if (!state.status?.running) { toast('err', '核心未运行', `先到服务页启动 ${eng()}`); return; }
   try {
-    const d = await api('/api/v1/nodes/delay', { method: 'POST', body: JSON.stringify({ tags: [tag] }) });
+    // 单点测速是显式动作，永远实测，不吃缓存。
+    const d = await api('/api/v1/nodes/delay', { method: 'POST', body: JSON.stringify({ tags: [tag], refresh: true }) });
     state.delays = d.delays;
     renderNodes(); renderDashNodes(); renderStatus();
   } catch (e) {
@@ -779,14 +773,16 @@ async function testAll() {
   if (!state.status?.running) { toast('err', '核心未运行', `先到服务页启动 ${eng()}`); return; }
   state.testRunning = true;
   $('#testAllBtn').disabled = true;
-  $('#stProgress').textContent = '测速中… 并发 3';
+  $('#stProgress').textContent = '测速中…';
   try {
     const tags = filteredNodes().map((n) => n.tag);
-    const d = await api('/api/v1/nodes/delay', { method: 'POST', body: JSON.stringify({ tags }) });
+    const refresh = !!$('#forceTest')?.checked;
+    const d = await api('/api/v1/nodes/delay', { method: 'POST', body: JSON.stringify({ tags, refresh }) });
     state.delays = d.delays;
-    $('#stProgress').textContent = `上次测速 刚刚 · ${tags.length}/${tags.length}`;
+    const cached = d.cached || 0;
+    $('#stProgress').textContent = `完成 ${tags.length}/${tags.length}` + (cached ? ` · ${cached} 缓存` : '');
     renderNodes(); renderDashNodes(); renderStatus();
-    toast('ok', '测速完成', `${tags.length} 个节点，结果缓存 5 分钟`);
+    toast('ok', '测速完成', cached ? `实测 ${tags.length - cached} 个，${cached} 个命中缓存` : `${tags.length} 个节点全部实测`);
   } catch (e) {
     toast('err', '测速失败', e.message);
   } finally {
@@ -800,7 +796,7 @@ async function testAll() {
 function renderDashNodes() {
   const box = $('#dashNodes');
   if (!state.nodes.length) {
-    box.innerHTML = `<div style="padding:24px 16px;color:var(--text-4);font-size:11.5px">还没有节点，先去「订阅」页添加订阅</div>`;
+    box.innerHTML = `<div class="empty-cell">还没有节点，先去「订阅」页添加订阅</div>`;
     return;
   }
   const withDelay = state.nodes
@@ -817,7 +813,7 @@ function renderDashNodes() {
     return `<div class="node-mini">
       <span class="flag" style="background:${regionColor(n.region)}">${esc(n.region || '??')}</span>
       <span class="nm">${esc(stripFlag(n.name))}<em>${esc(n.type)}</em></span>
-      <span class="lat ${c}" style="width:58px;text-align:right">${latText(ms)}</span>
+      <span class="lat lat-right ${c}">${latText(ms)}</span>
     </div>`;
   }).join('');
 }
@@ -829,22 +825,13 @@ function renderConfig() {
   const raw = state.configRaw || '';
   if (editor) editor.value = raw;
   $('#codeStat').textContent = raw ? `行 ${raw.split('\n').length}` : '空';
-  $('#codeSrc').textContent = raw ? `来自 ${engFile()}` : '尚未生成';
   const fn = $('#cfgFileName'); if (fn) fn.textContent = engFile();
-  const lang = $('#cfgLang'); if (lang) lang.textContent = engLang();
   const tab = $('#cfgTabName'); if (tab) tab.textContent = `原始 ${engLang()}`;
   const chk = $('#checkCmd'); if (chk) chk.textContent = engCheckCmd();
-  const chk2 = $('#cfgCheckCmd'); if (chk2) chk2.textContent = engIsMihomo() ? 'mihomo -t' : 'sing-box check';
-  const tplFn = $('#tplFileName'); if (tplFn) tplFn.textContent = engIsMihomo() ? 'template.yaml' : 'template.json';
-  const tplSk = $('#tplSkeleton');
-  if (tplSk) tplSk.textContent = engIsMihomo() ? 'proxies / proxy-groups / rules 骨架' : 'inbounds / dns / route 骨架';
-  const tplMg = $('#tplMergeNote');
-  if (tplMg) tplMg.textContent = engIsMihomo() ? 'YAML 合并 + 占位符替换' : 'JSON 合并 + 占位符替换';
-  $('#srcNodes').textContent = `${state.nodes.filter((n) => n.enabled).length} 个启用节点`;
 
   const list = $('#snapList');
   if (!state.snapshots.length) {
-    list.innerHTML = `<div style="padding:20px 16px;color:var(--text-4);font-size:11.5px">还没有快照，第一次下发后自动生成</div>`;
+    list.innerHTML = `<div class="empty-cell">还没有快照，第一次下发后自动生成</div>`;
   } else {
     list.innerHTML = state.snapshots.map((s) => `
       <div class="snap">
@@ -865,7 +852,7 @@ async function renderFromTemplate() {
     const d = await api('/api/v1/config/render', { method: 'POST' });
     state.configRaw = d.raw;
     renderConfig();
-    toast('ok', '已重新渲染', '模板 + 节点片段合并完成，记得校验后应用');
+    toast('ok', '已重新渲染');
   } catch (e) {
     toast('err', '渲染失败', e.message);
   }
@@ -880,7 +867,7 @@ async function validateConfig() {
     out.innerHTML = `<div class="dim">${esc(engCheckCmd())}</div>
       <div class="${r.ok ? 'ok' : 'err'}">${r.ok ? '✓ 校验通过' : '✗ 校验失败'}（${r.elapsed_ms}ms）</div>
       ${r.output ? `<div class="${r.ok ? 'dim' : 'err'}">${esc(r.output).replace(/\n/g, '<br>')}</div>` : ''}`;
-    toast(r.ok ? 'ok' : 'err', r.ok ? '校验通过' : '校验失败', r.ok ? '可以安全写入' : '配置未写入磁盘');
+    toast(r.ok ? 'ok' : 'err', r.ok ? '校验通过' : '校验失败', r.ok ? '' : '配置未写入磁盘');
   } catch (e) {
     out.innerHTML = `<div class="err">${esc(e.message)}</div>`;
     toast('err', '校验失败', e.message);
@@ -892,7 +879,7 @@ async function applyConfig() {
   if (!raw) { toast('err', '没有配置内容'); return; }
   const ok = await confirmDialog({
     title: '保存并应用配置？',
-    body: `会先执行 <b>${engIsMihomo() ? 'mihomo -t' : 'sing-box check'}</b>，通过后生成快照、原子写入并重启核心。启动失败会自动回滚。`,
+    body: '校验通过后写入并重启核心，失败自动回滚。',
     confirm: '保存并应用'
   });
   if (!ok) return;
@@ -914,7 +901,7 @@ async function applyConfig() {
 async function rollbackTo(version) {
   const ok = await confirmDialog({
     title: `回滚到 v${version}？`,
-    body: `回滚前会先执行 ${engIsMihomo() ? 'mihomo -t' : 'sing-box check'}，通过后写入并重启核心。`,
+    body: '校验通过后写入并重启核心。',
     confirm: '回滚并重启',
     danger: true
   });
@@ -956,10 +943,10 @@ function renderLogs() {
   const nearBottom = full.scrollHeight - full.scrollTop - full.clientHeight < 60;
   full.innerHTML = state.logs.length
     ? state.logs.map((l) => logLine(l, false)).join('')
-    : '<div style="color:var(--text-4)">暂无日志</div>';
+    : '<div class="dim">暂无日志</div>';
   if (nearBottom) full.scrollTop = full.scrollHeight;
   $('#dashLog').innerHTML = state.logs.slice(-7).map((l) => logLine(l, false)).join('')
-    || '<div style="color:var(--text-4)">暂无日志</div>';
+    || '<div class="dim">暂无日志</div>';
 }
 
 /* ------------------------------------------------------------ render: connections */
@@ -988,18 +975,17 @@ function renderConns() {
           : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>'}
       </span>
       <div class="col"><div class="t">${esc(m.host || m.destinationIP || '—')}</div><div class="s">${esc((m.network || '').toUpperCase())}</div></div></div></td>
-      <td><span class="num" style="color:var(--text-3)">${esc(target)}</span></td>
-      <td><div class="t" style="font-size:11.5px">${esc(stripFlag(chain))}</div><div class="s" style="font-size:10px;color:var(--text-4);font-family:var(--mono)">${esc(c.rule || 'final')}</div></td>
-      <td><span class="badge ${out === 'direct' ? '' : 'lime'}" style="height:17px">${esc(m.network || 'tcp')}</span></td>
-      <td class="t-right"><span class="conn-rate" style="justify-content:flex-end"><span class="up">↑</span>${fmtBytes(c.upload || 0)}</span></td>
-      <td class="t-right"><span class="conn-rate" style="justify-content:flex-end"><span class="dn">↓</span>${fmtBytes(c.download || 0)}</span></td>
-      <td><span class="num" style="color:var(--text-3)">${durTxt}</span></td>
+      <td><span class="dim">${esc(target)}</span></td>
+      <td><div class="chain-cell">${esc(stripFlag(chain))}</div><div class="rule-cell">${esc(c.rule || 'final')}</div></td>
+      <td><span class="badge ${out === 'direct' ? '' : 'lime'}">${esc(m.network || 'tcp')}</span></td>
+      <td class="t-right"><span class="conn-rate right-auto"><span class="up">↑</span>${fmtBytes(c.upload || 0)}</span></td>
+      <td class="t-right"><span class="conn-rate right-auto"><span class="dn">↓</span>${fmtBytes(c.download || 0)}</span></td>
+      <td><span class="dim num">${durTxt}</span></td>
     </tr>`;
-  }).join('') : `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-4)">暂无连接</td></tr>`;
+  }).join('') : `<tr><td colspan="7" class="empty-cell">暂无连接</td></tr>`;
 
   $('#connCount').textContent = `${rows.length} / 200`;
   $('#statConns').textContent = state.conns.length;
-  $('#statConnsFoot').textContent = state.conns.length ? '来自 Clash API 实时推送' : '当前没有活跃连接';
 }
 
 /* ------------------------------------------------------------ traffic chart */
@@ -1117,7 +1103,7 @@ function renderTrafficStats() {
   $('#statDown').innerHTML = mb >= 1
     ? `${mb.toFixed(1)}<small>MB/s</small>`
     : `${(t.down / 1024).toFixed(t.down > 1024 ? 0 : 1)}<small>KB/s</small>`;
-  $('#statUpFoot').textContent = `上行 ${fmtRate(t.up)}`;
+  $('#statUpRate').textContent = `上行 ${fmtRate(t.up)}`;
   $('#connUp').textContent = `↑ ${fmtRate(t.up)}`;
   $('#connDown').textContent = `↓ ${fmtRate(t.down)}`;
 }
@@ -1349,13 +1335,8 @@ function renderLanProxyStats(d) {
   $('#lpStatSocks').textContent = d.enabled ? `${host}:${d.socks_port}` : '—';
   $('#lpStatHttp').textContent = d.enabled ? `${host}:${d.http_port}` : '—';
   const hasCred = !!d.username && !!d.password;
-  $('#lpStatAuth').textContent = !d.enabled ? '—' : hasCred ? `用户名密码（${d.username}）` : '无鉴权（开放代理）';
+  $('#lpStatAuth').textContent = !d.enabled ? '—' : hasCred ? `用户名密码（${d.username}）` : '无鉴权';
   $('#lpStatAuth').className = 'badge ' + (!d.enabled ? '' : hasCred ? 'lime' : 'amber');
-  $('#lpStatNote').innerHTML = d.enabled
-    ? (hasCred
-      ? '已启用鉴权，客户端需填写相同的用户名与密码。'
-      : '未设置账号密码，属于开放代理。')
-    : '未开启时，sing-box 配置里不会有这两个入站。';
 }
 
 // lanProxyBody 收集这一页上的全部字段。
@@ -1377,16 +1358,13 @@ async function saveLanProxy(kind) {
   const body = lanProxyBody();
   const isMixed = kind === 'mixed';
   const open = body.enabled && !body.username && !body.password;
-  let confirmBody = '会重新渲染配置并重启核心，现有连接会中断约 1 秒。';
+  let confirmBody = '保存后重启核心，连接短暂中断。';
   let title = '保存局域网代理设置？';
   if (isMixed) {
     title = '保存 mixed 入站设置？';
-    confirmBody = `mixed 入站将改为 <b>${body.mixed_listen}:${body.mixed_port}</b>。<br><br>` + confirmBody;
-    if (body.mixed_listen !== '127.0.0.1') {
-      confirmBody = '<b style="color:var(--warn)">⚠ mixed 入站不支持鉴权，监听 0.0.0.0 等于把无鉴权代理暴露给整个局域网</b><br><br>' + confirmBody;
-    }
+    confirmBody = `mixed 入站将改为 <b>${body.mixed_listen}:${body.mixed_port}</b>，重启核心生效。`;
   } else if (open) {
-    confirmBody = '<b style="color:var(--warn)">⚠ 用户名和密码均为空，将创建「无鉴权开放代理」</b><br>局域网内任意设备（以及能连通该端口的外部网络）都可免密使用此代理，存在被他人滥用的风险。<br><br>' + confirmBody;
+    confirmBody = '将创建无鉴权开放代理：局域网内任意设备都可免密使用。';
   }
   const ok = await confirmDialog({ title, body: confirmBody, confirm: '保存并应用' });
   if (!ok) return;
@@ -1415,7 +1393,6 @@ async function saveLanProxy(kind) {
 $('#lpGen').onclick = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(8));
   $('#lpPass').value = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-  toast('info', '已生成新密码', '点「保存并应用」后生效，记得同步到客户端');
 };
 
 $('#lpSave').onclick = () => saveLanProxy('lan');
@@ -1445,7 +1422,7 @@ $('#dnsSwitch').onclick = async () => {
   if (next) {
     const ok = await confirmDialog({
       title: '接管局域网 DNS？',
-      body: '会把来自这些网段的 53 端口查询劫持到当前内核：<br><code>' + ((state.tproxy?.cidrs || []).join('  ')) + '</code><br>好处是客户端能拿到未被污染的解析；代价是路由器上 dnsmasq 提供的本地域名对这些客户端失效。',
+      body: '53 端口查询将劫持到当前内核：<code>' + ((state.tproxy?.cidrs || []).join('  ')) + '</code>',
       confirm: '开始接管'
     });
     if (!ok) return;
@@ -1453,7 +1430,7 @@ $('#dnsSwitch').onclick = async () => {
   try {
     const d = await api('/api/v1/tproxy', { method: 'PUT', body: JSON.stringify({ enabled: true, dns: next }) });
     toast(next ? 'ok' : 'info', next ? '已接管局域网 DNS' : '已恢复局域网 DNS',
-      next ? `${d.rules} 条规则，客户端解析将由 ${engLabel()} 处理` : '53 端口不再劫持');
+      next ? `${d.rules} 条规则` : '53 端口不再劫持');
     await loadTproxy();
   } catch (e) {
     toast('err', '操作失败', e.message);
@@ -1473,7 +1450,7 @@ $('#localSwitch').onclick = async () => {
       body: JSON.stringify({ enabled: true, local: next })
     });
     toast(next ? 'ok' : 'info', next ? '已接管本机流量' : '已恢复本机直连',
-      next ? '现在服务器上 curl 也会走代理' : 'output 链已移除');
+      next ? `${d.rules} 条规则` : 'output 链已移除');
     await loadTproxy();
   } catch (e) {
     toast('err', '操作失败', e.message);
@@ -1486,7 +1463,7 @@ $('#tproxySwitch').onclick = async () => {
   if (next) {
     const ok = await confirmDialog({
       title: '开启透明代理？',
-      body: '将向 nftables 写入 redirect 规则，接管下列网段的 TCP 流量：<br><code>' + ((state.tproxy?.cidrs || []).join('  ') || '自动检测') + '</code><br>目标为内网的流量会直接放行，本机 output 不受影响。',
+      body: '接管以下网段的 TCP 流量：<code>' + ((state.tproxy?.cidrs || []).join('  ') || '自动检测') + '</code>',
       confirm: '开启 redirect'
     });
     if (!ok) return;
@@ -1494,7 +1471,7 @@ $('#tproxySwitch').onclick = async () => {
   try {
     const d = await api('/api/v1/tproxy', { method: 'PUT', body: JSON.stringify({ enabled: next }) });
     toast(next ? 'ok' : 'info', next ? '透明代理已开启' : '透明代理已关闭',
-      next ? `${d.rules} 条规则已下发，局域网设备现在会被接管` : 'nftables 表已删除，流量恢复直连');
+      next ? `${d.rules} 条规则已下发` : 'nftables 表已删除，流量恢复直连');
     if (d.warning) toast('info', '注意', d.warning);
     await loadTproxy();
   } catch (e) {
@@ -1519,7 +1496,7 @@ async function loadTun() {
       ? (linux ? '面板未以 root 运行' : '面板未以管理员运行')
       : (linux ? 'root 身份运行' : '管理员身份运行');
     $('#tunAdmin').className = 'badge ' + (d.supported === false ? 'red' : 'lime');
-    // 明细（设备/范围/权限）只在启用后展示
+    // 权限行只在启用后展示
     if ($('#tpTunGrid')) $('#tpTunGrid').style.display = on ? '' : 'none';
   } catch (e) { /* ignore */ }
 }
@@ -1531,7 +1508,7 @@ async function tunToggle() {
   const ok = await confirmDialog({
     title: next ? '开启 TUN 模式？' : '关闭 TUN 模式？',
     body: next
-      ? `会创建 <code>${engTunDev()}</code> 虚拟网卡，接管<b>整机所有流量</b>（包括不走系统代理的程序），需要面板以${who}身份运行。<br>配置重新渲染并重启核心，现有连接会中断约 1 秒。`
+      ? `创建 <code>${engTunDev()}</code> 虚拟网卡接管整机流量，需以${who}运行；连接中断约 1 秒。`
       : '移除 TUN 入站并重启核心，整机流量恢复直连。',
     confirm: next ? '开启 TUN' : '关闭 TUN'
   });
@@ -1581,7 +1558,7 @@ $('#authSwitch').onclick = async () => {
     if (s.login_required) {
       const ok = await confirmDialog({
         title: '关闭登录？',
-        body: `关闭后打开面板地址会直接进入首页，任何能访问 <code>${esc(s.listen)}</code> 的人都可以查看和修改面板设置。`,
+        body: `任何能访问 <code>${esc(s.listen)}</code> 的人都可以直接操作面板。`,
         confirm: '关闭登录',
         danger: true
       });
@@ -1641,21 +1618,9 @@ $('#setListenInput').onkeydown = (e) => {
 /* ------------------------------------------------------------ routing */
 
 const ROUTE_META = {
-  rule: {
-    name: '规则分流',
-    badge: 'badge lime',
-    desc: '国内域名 / IP 直连，其余流量走节点；推荐日常使用。'
-  },
-  global: {
-    name: '全局代理',
-    badge: 'badge amber',
-    desc: '所有流量（包括国内网站）都走节点；适合需要完全隐藏来源的场景，国内服务可能变慢或受限。'
-  },
-  direct: {
-    name: '全局直连',
-    badge: 'badge',
-    desc: '所有流量直连，不经过节点；仅用于排查节点或路由问题。'
-  }
+  rule: { name: '规则分流', badge: 'badge lime' },
+  global: { name: '全局代理', badge: 'badge amber' },
+  direct: { name: '全局直连', badge: 'badge' }
 };
 
 function renderRouting(mode) {
@@ -1663,7 +1628,6 @@ function renderRouting(mode) {
   $$('#routeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
   $('#routeBadge').textContent = meta.name;
   $('#routeBadge').className = meta.badge;
-  $('#routeDesc').textContent = meta.desc;
 }
 
 async function loadRouting() {
@@ -1679,7 +1643,7 @@ async function setRouting(mode) {
   if (!meta || (state.routing && state.routing.mode === mode)) return;
   const ok = await confirmDialog({
     title: `切换到「${meta.name}」？`,
-    body: `${meta.desc}<br><br>会重新渲染配置并重启核心，现有连接短暂中断；应用失败会自动回滚。`,
+    body: '重新渲染配置并重启核心，连接短暂中断；失败自动回滚。',
     confirm: '切换模式'
   });
   if (!ok) return;
@@ -1699,8 +1663,6 @@ async function setRouting(mode) {
 }
 
 $$('#routeSeg button').forEach((b) => (b.onclick = () => setRouting(b.dataset.mode)));
-
-/* ------------------------------------------------------------ autostart */
 
 /* ------------------------------------------------------------ engine */
 
@@ -1753,18 +1715,18 @@ function renderEngine() {
     b.title = item && !item.ok ? (item.error || '不可用') : '';
   });
   note.innerHTML = cur === 'mihomo'
-    ? `当前使用 <b>mihomo</b>：Clash 系 YAML 配置（<code>${esc(d.config)}</code>），节点与订阅格式同 Clash，兼容 Clash API。`
-    : `当前使用 <b>sing-box</b>：JSON 配置（<code>${esc(d.config)}</code>）。`;
+    ? `mihomo · Clash YAML · <code>${esc(d.config)}</code>`
+    : `sing-box · JSON · <code>${esc(d.config)}</code>`;
   const g = state.geo;
   const geoRow = g ? `
-    <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px">
-      <span style="color:var(--text-3)">geo 数据（mihomo 用）</span>
+    <div class="kv">
+      <span class="k">geo 数据（mihomo 用）</span>
       <span class="badge mono" title="${esc(g.state === 'failed' ? (g.error || '') : (g.missing || []).join('、'))}">${esc(geoLabel(g))}</span>
     </div>` : '';
   $('#engineDetail').innerHTML = (d.available || []).map((it) => `
-    <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px">
-      <span style="color:var(--text-3)">${esc(it.label)}</span>
-      <span class="badge mono" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.version || it.bin || '')}">${it.ok ? esc(it.version_short || it.version || '可用') : '不可用'}</span>
+    <div class="kv">
+      <span class="k">${esc(it.label)}</span>
+      <span class="badge mono ellipsis" title="${esc(it.version || it.bin || '')}">${it.ok ? esc(it.version_short || it.version || '可用') : '不可用'}</span>
     </div>`).join('') + geoRow;
 }
 
@@ -1778,12 +1740,10 @@ async function switchEngine(name) {
   }
   const needGeo = !!geo && geo.state !== 'ready';
   const geoNote = !needGeo ? ''
-    : `还需要准备约 12 MB 的 geo 数据（${(geo.missing || []).join('、') || 'GeoSite.dat、geoip.metadb'}），面板会先下载再启动。`;
+    : `首次启动需先下载 geo 数据（${(geo.missing || []).join('、') || 'GeoSite.dat、geoip.metadb'}）。`;
   const ok = await confirmDialog({
     title: `切换到 ${name}？`,
-    body: `会停止当前内核，按 <b>${name}</b> 重新渲染一份配置（${name === 'mihomo' ? 'config.yaml' : 'config.json'}）并重启核心。` +
-      geoNote +
-      '切换失败会自动切回原内核。',
+    body: `按 ${name} 重新渲染配置并重启核心；失败自动切回。` + geoNote,
     confirm: '切换内核'
   });
   if (!ok) return;
@@ -1832,14 +1792,6 @@ $$('#engineSeg button').forEach((b) => {
 
 $('#asCoreSwitch').onclick = async () => {
   const next = !$('#asCoreSwitch').classList.contains('on');
-  const ok = await confirmDialog({
-    title: next ? `开启 ${eng()} 开机自启？` : `关闭 ${eng()} 开机自启？`,
-    body: next
-      ? `面板启动时会自动拉起 ${eng()} 核心。`
-      : '面板启动后不再自动拉起核心，需要在「服务」页手动启动。',
-    confirm: next ? '开启' : '关闭'
-  });
-  if (!ok) return;
   try {
     await api('/api/v1/autostart', { method: 'PUT', body: JSON.stringify({ core: next }) });
     toast('ok', '已保存', next ? '面板启动时将自动拉起核心' : '面板启动时不再自动拉起核心');
@@ -1854,13 +1806,9 @@ $('#asPanelSwitch').onclick = async () => {
   const linux = isLinux();
   const ok = await confirmDialog({
     title: next ? '注册面板开机自启？' : '取消面板开机自启？',
-    body: next
-      ? (linux
-        ? '执行 <code>systemctl enable sing-box-panel</code>；unit 文件缺失时按当前面板路径自动生成。'
-        : '注册 SYSTEM 计划任务 <code>sing-box-panel</code>：开机自动以最高权限启动面板（TUN 即刻可用，失败 1 分钟后自动重启）。')
-      : (linux
-        ? '执行 <code>systemctl disable sing-box-panel</code>，重启后面板不再自动运行；当前运行中的面板不受影响。'
-        : '删除计划任务 <code>sing-box-panel</code>，重启后面板不再自动运行；当前运行中的面板不受影响。'),
+    body: linux
+      ? `<code>systemctl ${next ? 'enable' : 'disable'} sing-box-panel</code>`
+      : `${next ? '注册' : '删除'}计划任务 <code>sing-box-panel</code>（SYSTEM，最高权限）。`,
     confirm: next ? '注册自启' : '取消自启'
   });
   if (!ok) return;
@@ -1881,19 +1829,18 @@ $('#asPanelSwitch').onclick = async () => {
 /* ------------------------------------------------------------ router */
 
 const PAGE_META = {
-  dashboard: ['概览', '控制台'], subs: ['订阅', '资源'], nodes: ['节点', '资源'],
-  config: ['配置', '管理'], service: ['服务', '管理'], tproxy: ['透明代理', '网络'],
-  lanproxy: ['局域网代理', '网络'], conns: ['连接', '网络'], settings: ['设置', '系统']
+  dashboard: '概览', subs: '订阅', nodes: '节点',
+  config: '配置', service: '服务', tproxy: '透明代理',
+  lanproxy: '局域网代理', conns: '连接', settings: '设置'
 };
 
 function go(page) {
   state.page = page;
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${page}`));
   $$('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
-  let [t, section] = PAGE_META[page] || ['概览', '控制台'];
+  let t = PAGE_META[page] || '概览';
   if (page === 'tproxy' && !isLinux()) t = 'TUN 模式';
   $('#crumbTitle').textContent = t;
-  $('#crumbPath').innerHTML = `/ <b>${section}</b>`;
   $('#content').scrollTop = 0;
   if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
   // 进入局域网代理页时重新拉一次，避免显示别的页面停留期间改过的旧值
@@ -1937,7 +1884,7 @@ function renderPalette(q = '') {
     if (c.g !== last) { html += `<div class="palette-group">${c.g}</div>`; last = c.g; }
     html += `<button class="palette-item ${i === 0 ? 'on' : ''}" data-i="${i}"><svg width="14" height="14"><use href="#${c.i}"/></svg>${c.t}</button>`;
   });
-  $('#paletteList').innerHTML = html || `<div style="padding:24px;text-align:center;color:var(--text-4);font-size:12px">无匹配命令</div>`;
+  $('#paletteList').innerHTML = html || `<div class="empty-cell">无匹配命令</div>`;
   $('#paletteList')._items = items;
   $$('.palette-item').forEach((el) => (el.onclick = () => execPalette(items[+el.dataset.i])));
 }
@@ -1992,6 +1939,17 @@ function renderAll() {
   drawChart();
 }
 
+// 全站 .switch 由一个 class 驱动，ARIA 状态用同一个观察器统一同步，
+// 不必在每个 toggle 调用点各自维护（新增开关自动获得正确的语义）。
+new MutationObserver((muts) => {
+  for (const m of muts) {
+    const el = m.target;
+    if (el.classList && el.classList.contains('switch')) {
+      el.setAttribute('aria-checked', String(el.classList.contains('on')));
+    }
+  }
+}).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true });
+
 /* ------------------------------------------------------------ start */
 
 (function initTheme() {
@@ -2011,17 +1969,22 @@ function renderAll() {
   const initial = location.hash.replace('#', '');
   if (PAGE_META[initial]) go(initial);
 
-  // 先询问后端是否启用登录：panel.conf 的 username/password 都为空时直接进入首页。
-  // 旧版本没有该接口，请求失败时按需要登录处理。
+  // 先询问后端登录状态：needs_setup = 全新面板，强制先设置登录账户密码；
+  // login_disabled = 面板内关掉了登录，直接进入首页。旧版本没有该接口时按需要登录处理。
   try {
     const res = await fetch('/api/v1/auth/status');
     if (res.ok) {
       const info = await res.json();
       state.authRequired = info.required !== false;
+      state.needsSetup = info.needs_setup === true;
     }
   } catch (e) { /* keep authRequired = true */ }
   $('#logoutBtn').style.display = state.authRequired ? '' : 'none';
 
+  if (state.needsSetup) {
+    showSetup();
+    return;
+  }
   if (!state.authRequired) {
     await boot();
     return;

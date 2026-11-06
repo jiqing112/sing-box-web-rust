@@ -1,6 +1,6 @@
 // panel.conf：exe 旁边的端口/账户/密码配置文件。
-// UsernameSet/PasswordSet 用于区分「没写这一项」和「写了但留空」：
-// 后者同时出现在两项上时表示明确关闭登录。
+// password 非空 = 直接应用该凭据（自动化部署路径）；留空 = 全新面板进入
+// 网页初始化流程（首次启动设置账户密码），已有账户则保持现有密码。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,13 +12,6 @@ pub struct PanelConf {
     pub password: String,
     pub username_set: bool,
     pub password_set: bool,
-}
-
-impl PanelConf {
-    /// 仅当两项都显式留空时成立。
-    pub fn login_disabled(&self) -> bool {
-        self.username_set && self.password_set && self.username.is_empty() && self.password.is_empty()
-    }
 }
 
 /// 固定放在 exe 旁边，与内核的发现逻辑一致，整个目录拷走即完成迁移。
@@ -120,8 +113,11 @@ fn write_panel_conf_template(path: &Path) {
 # 面板监听地址，例如 127.0.0.1:9090（仅本机访问）或 0.0.0.0:9090（局域网可访问）
 listen=127.0.0.1:9090
 
-# 登录用户名/密码；两项都留空表示关闭登录，打开端口直接进入首页
-# 只清空 password 会保持现有密码不变；修改用户名时必须同时填写 password
+# 登录用户名/密码。
+# - 首次启动打开面板网页时会要求设置登录账户密码（用户名默认用这里的 username）；
+# - password 填上则跳过网页初始化，直接以该账户密码生效（适合自动化部署）；
+# - 面板已经初始化过时，只填 username 不填 password 不会改动现有密码；
+# - 关闭登录请用面板内「设置 → 允许免密码访问」开关，本文件不再承担。
 username=admin
 
 # 此文件为明文，请注意保管

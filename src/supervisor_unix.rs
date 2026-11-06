@@ -31,8 +31,18 @@ pub fn process_alive(pid: i32) -> bool {
 
 /// 清理上次面板强退后残留的内核进程。
 /// 匹配条件：exe 与本面板内核同路径，且命令行里引用了本面板的数据目录。
-/// 读不到命令行时按「是孤儿」处理（宁可多杀也不能漏）。
-pub fn sweep_orphans(bin: &str, data_dir: &Path) {
+/// 读不到命令行时按「是孤儿」处理（Linux 上 /proc 扫一遍很便宜，宁可多杀也不能漏）。
+///
+/// 多个内核逐个扫 /proc，成本可忽略，不必像 Windows 那样合并成一次外部查询。
+pub fn sweep_orphans(bins: &[String], data_dir: &Path) {
+    for bin in bins {
+        if !bin.is_empty() {
+            sweep_one(bin, data_dir);
+        }
+    }
+}
+
+fn sweep_one(bin: &str, data_dir: &Path) {
     let Ok(self_exe) = std::fs::canonicalize(bin) else { return };
     let self_pid = std::process::id() as i32;
     let Ok(entries) = std::fs::read_dir("/proc") else { return };

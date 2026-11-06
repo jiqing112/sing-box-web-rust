@@ -46,9 +46,9 @@ systemctl --no-pager --lines=6 status sing-box-panel || true
 echo
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo "面板地址: http://${IP:-<本机IP>}:9090"
-if [ -f "$PREFIX/data/initial-password" ]; then
-  echo "初始密码: $(cat "$PREFIX/data/initial-password")"
-  echo "（登录后请在「设置 → 访问控制」里改掉，然后删除 $PREFIX/data/initial-password）"
+if [ ! -f "$PREFIX/data/settings.json" ]; then
+  echo "首次使用：打开面板网页，按引导设置登录账户密码"
+  echo "（自动化部署可在 panel.conf 填 password= 跳过网页初始化）"
 fi
 echo
 echo "常用命令："
