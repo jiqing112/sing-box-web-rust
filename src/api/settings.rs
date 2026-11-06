@@ -611,6 +611,49 @@ impl Server {
         json_ok(json!({"ok": true, "enabled": enabled, "running": tun_running}))
     }
 
+    /* ------------------------------------------------------------ sysproxy（Windows 系统代理） */
+
+    pub(crate) async fn h_sysproxy_get(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let st = crate::sysproxy::status(app.store.dir());
+        json_ok(json!({
+            "enabled": st.enabled,
+            "server": st.server,
+            "supported": cfg!(windows),
+        }))
+    }
+
+    pub(crate) async fn h_sysproxy_set(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let inb: Value = match parse_body(&body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        let enabled = inb.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !cfg!(windows) {
+            return err_json(StatusCode::BAD_REQUEST, "unsupported", "系统代理仅 Windows 支持");
+        }
+        let set = app.store.settings();
+        let port = if set.mixed_port > 0 { set.mixed_port } else { 7890 };
+        if let Err(e) =
+            crate::sysproxy::set_enabled(enabled, port as u16, app.store.dir())
+        {
+            return err_json(StatusCode::BAD_REQUEST, "sysproxy_failed", &e);
+        }
+        Self::h_sysproxy_get(State(app), headers).await
+    }
+
     /* ------------------------------------------------------------ autostart */
 
     pub(crate) async fn h_autostart_get(

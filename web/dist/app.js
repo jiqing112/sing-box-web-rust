@@ -23,7 +23,7 @@ const state = {
   page: 'dashboard',
   testRunning: false,
   // 运行时按需填充的接口数据（初始声明便于阅读与调试）
-  tproxy: null, tun: null, lanproxy: null, routing: null,
+  tproxy: null, tun: null, lanproxy: null, routing: null, sysproxy: null,
   autostart: null, geo: null
 };
 
@@ -327,6 +327,7 @@ async function boot() {
   renderAll();
   connectTraffic();
   connectConnections();
+  loadSysproxy();
   loadTproxy();
   loadLanProxy();
   loadTun();
@@ -343,6 +344,7 @@ async function pollStatus() {
     state.status = await api('/api/v1/status');
     renderStatus();
     loadTun();
+    loadSysproxy();
     loadExitIp();
     if (state.lanproxy) renderLanProxyStats(state.lanproxy);
   } catch (e) { /* ignore transient */ }
@@ -482,12 +484,13 @@ function renderStatus() {
   const linux = isLinux();
   $$('.nav-item[data-page="tproxy"]').forEach((el) => (el.style.display = ''));
   $$('[data-goto="tproxy"]').forEach((el) => (el.style.display = ''));
-  $('#navTpLabel').textContent = linux ? '透明代理' : 'TUN 模式';
-  $('#dashTpLabel').textContent = linux ? '透明代理' : 'TUN 模式';
-  $('#tpTitle').textContent = linux ? '透明代理' : 'TUN 模式';
+  $('#navTpLabel').textContent = linux ? '透明代理' : '代理模式';
+  $('#dashTpLabel').textContent = linux ? '透明代理' : '代理模式';
+  $('#tpTitle').textContent = linux ? '透明代理' : '代理模式';
   // 流量接管卡：redirect 行仅 Linux 显示，TUN 行两平台都有
   $('#redirectRow').style.display = linux ? '' : 'none';
   $('#redirectDivider').style.display = linux ? '' : 'none';
+  $('#sysproxyRow').style.display = linux ? 'none' : '';
   $('#nftPreview').style.display = linux ? '' : 'none';
   // Windows 下右列（nftables 预览）不存在，网格退化为单列避免大片留白
   $('#page-tproxy .grid-2').style.gridTemplateColumns = linux ? '' : '1fr';
@@ -1499,7 +1502,64 @@ async function loadTun() {
     $('#tunAdmin').className = 'badge ' + (d.supported === false ? 'red' : 'lime');
     // 权限行只在启用后展示
     if ($('#tpTunGrid')) $('#tpTunGrid').style.display = on ? '' : 'none';
+    updateEntryStatus();
   } catch (e) { /* ignore */ }
+}
+
+// —— 系统代理（Windows）——
+async function loadSysproxy() {
+  if (isLinux()) return;
+  try {
+    const d = await api('/api/v1/sysproxy');
+    state.sysproxy = d;
+    const sw = $('#sysproxySwitch');
+    if (sw) { sw.classList.toggle('on', !!d.enabled); sw.disabled = false; }
+    const b = $('#sysproxyBadge');
+    if (b) { b.textContent = d.enabled ? '已接管' : '未启用'; b.className = 'badge ' + (d.enabled ? 'lime' : 'amber'); }
+    const srv = $('#sysproxyServer');
+    if (srv) srv.textContent = d.server || '—';
+  } catch (e) { /* ignore */ }
+  updateEntryStatus();
+}
+
+$('#sysproxySwitch').onclick = async () => {
+  const sw = $('#sysproxySwitch');
+  const next = !sw.classList.contains('on');
+  sw.disabled = true;
+  const badge = $('#sysproxyBadge');
+  badge.textContent = '设置中…';
+  badge.className = 'badge amber';
+  try {
+    await api('/api/v1/sysproxy', { method: 'PUT', body: JSON.stringify({ enabled: next }) });
+    toast(next ? 'ok' : 'info', next ? '系统代理已开启' : '系统代理已关闭',
+      next ? '浏览器即时生效，无需重启' : '已还原开启前状态');
+  } catch (e) {
+    toast('err', '设置失败', e.message);
+  }
+  await loadSysproxy();
+};
+
+// 入口（系统代理/TUN）与出口（路由模式）的关系提示条
+function updateEntryStatus() {
+  const el = $('#entryStatus');
+  if (!el || isLinux()) { if (el) el.style.display = 'none'; return; }
+  const sys = !!(state.sysproxy && state.sysproxy.enabled);
+  const tun = !!(state.tun && state.tun.running);
+  let text, warn = false;
+  if (!sys && !tun) {
+    text = '没有任何入口开启，路由模式对普通流量不生效——开启「系统代理」或「TUN 虚拟网卡」其一';
+    warn = true;
+  } else if (sys && tun) {
+    text = 'TUN 已接管全部流量，系统代理冗余，建议关闭其一';
+  } else if (tun) {
+    text = 'TUN 已接管整机流量（含不遵守系统代理的程序）';
+  } else {
+    text = '遵守系统代理的程序已接管；游戏等直连程序不受影响';
+  }
+  const t = $('#entryStatusText');
+  if (t) t.textContent = text;
+  el.classList.toggle('warn', warn);
+  el.style.display = '';
 }
 
 async function tunToggle() {
@@ -1840,7 +1900,7 @@ function go(page) {
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${page}`));
   $$('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
   let t = PAGE_META[page] || '概览';
-  if (page === 'tproxy' && !isLinux()) t = 'TUN 模式';
+  if (page === 'tproxy' && !isLinux()) t = '代理模式';
   $('#crumbTitle').textContent = t;
   $('#content').scrollTop = 0;
   if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
@@ -1866,7 +1926,7 @@ const COMMANDS = [
   { g: '页面', t: '节点列表', p: 'nodes', i: 'i-server' },
   { g: '页面', t: '配置编辑', p: 'config', i: 'i-code' },
   { g: '页面', t: '服务控制', p: 'service', i: 'i-activity' },
-  { g: '页面', t: '透明代理 / TUN', p: 'tproxy', i: 'i-shield' },
+  { g: '页面', t: '代理模式', p: 'tproxy', i: 'i-shield' },
   { g: '页面', t: '局域网代理', p: 'lanproxy', i: 'i-lan' },
   { g: '页面', t: '实时连接', p: 'conns', i: 'i-list' },
   { g: '操作', t: '重启内核', a: () => serviceAction('restart'), i: 'i-refresh' },

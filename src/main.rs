@@ -13,6 +13,7 @@ mod panelconf;
 mod platform;
 mod store;
 mod subscription;
+mod sysproxy;
 mod supervisor;
 mod supervisor_sys;
 #[cfg_attr(not(windows), allow(dead_code))]

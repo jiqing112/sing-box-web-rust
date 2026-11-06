@@ -480,7 +480,6 @@ mod autostart {
     /// 用户点「否」或 UAC 约 2 分钟超时：Start-Process 抛错、外层退出非零、
     /// 结果文件缺失，统一归为授权失败。
     fn elevate_set(on: bool, exe: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
-        use base64::Engine;
         let dir = std::env::temp_dir();
         let xml_path = dir.join(format!("sb-panel-task-{}.xml", crate::util::rand_hex(6)));
         let result = dir.join(format!("sb-panel-task-{}.txt", crate::util::rand_hex(6)));
@@ -496,7 +495,7 @@ mod autostart {
         }
 
         let ps = build_elevated_ps(on, &xml_path, &result);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(ps.encode_utf16().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>());
+        let encoded = utf16le_b64(&ps);
         let out = Command::new("powershell")
             .args([
                 "-NoProfile",

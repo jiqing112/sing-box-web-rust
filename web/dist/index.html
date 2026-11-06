@@ -372,7 +372,11 @@
             <h1 id="tpTitle">透明代理</h1>
             <div class="page-actions"><button class="btn" id="tproxyRefresh"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div>
           </div>
-          <div class="grid-2">
+          <div class="callout" id="entryStatus" style="display:none">
+            <svg width="15" height="15"><use href="#i-alert"/></svg>
+            <div id="entryStatusText"></div>
+          </div>
+          <div class="grid-2 mb-12" id="tproxyGrid">
             <div class="stack-12">
               <div class="card">
                 <div class="card-hd"><h3>路由模式</h3><div class="right"><span class="badge lime" id="routeBadge">规则分流</span></div></div>
@@ -386,10 +390,19 @@
               </div>
 
               <div class="card">
-                <div class="card-hd"><h3>流量接管</h3></div>
+                <div class="card-hd"><h3>流量入口</h3></div>
                 <div class="card-bd card-bd-rows">
                   <div class="kv">
                     <span class="k">核心状态</span><span class="badge mono" id="tpCore">—</span>
+                  </div>
+                  <div class="opt" id="sysproxyRow" style="display:none">
+                    <div class="opt-main">
+                      <div class="row-tight"><b class="opt-title-strong">系统代理</b>
+                        <span class="badge mono" id="sysproxyServer">—</span>
+                      </div>
+                    </div>
+                    <span class="badge amber" id="sysproxyBadge">未启用</span>
+                    <button class="switch" id="sysproxySwitch" role="switch" aria-checked="false"></button>
                   </div>
 
                   <!-- redirect（仅 Linux）：接管局域网设备 -->
