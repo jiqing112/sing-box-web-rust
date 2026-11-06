@@ -29,6 +29,8 @@ x86_64 / arm64 / mipsel(软浮点) 三架构可用。
 
 - 默认监听 `127.0.0.1:9090`；首次启动打开网页会要求设置登录账户密码，
   `-password`/`PANEL_PASSWORD`/panel.conf 的 `password=` 提供密码则跳过网页初始化。
+- **首次部署开箱即跑**：添加订阅并启用节点后，点「启动核心」（或重启面板）会自动
+  「渲染 → 校验 → 应用 → 拉起核心」，无需先去配置页手工操作。
 - 双内核部署：把官方 `sing-box` / `mihomo` 放在面板同目录，或用 `-sing-box` / `-mihomo` 指定路径。
 - 全部命令行参数：`-data -listen -sing-box -mihomo -engine -clash -token -password -autostart`
   （兼容 `-flag v` 与 `--flag=v` 两种写法；`PANEL_TOKEN` / `PANEL_PASSWORD` 环境变量同样有效）。
@@ -60,6 +62,11 @@ x86_64 / arm64 / mipsel(软浮点) 三架构可用。
   panel.conf 回写、systemd / OpenWrt procd / 计划任务开机自启（按 init 系统自动适配）、进程 RSS 上报（psapi / VmRSS）。
 - **Windows 托盘**：双击托盘图标打开网页配置，右键启停/重启核心、开机自启开关、优雅退出；
   explorer 重启自动恢复图标，`-notray` 可关闭（unix 无此模块，零依赖零开销）。
+- **代理模式页 + 系统代理**（Windows）：入口（系统代理/TUN 网卡）与出口（路由模式）
+  同页整合，状态条四态提示两者关系；系统代理一键把登录用户的 Windows 代理指向面板
+  mixed 端口（随设置），写完广播刷新浏览器免重启生效，关闭还原开启前原值。
+- **首次运行自动应用**：启动时无已应用配置且有启用节点 → 自动「渲染→应用」拉起核心；
+  网页点「启动核心」遇到空配置同样引导完成，首次部署零手工。
 - **前端**：与 Go 版同一套 `web/dist`（无框架原生 JS），ETag 协商缓存 + SPA fallback，零改动复用。
 
 ## 与 Go 版的实现差异（不影响功能）
@@ -105,7 +112,7 @@ cargo test            # 订阅解析 / 双内核渲染 / 引擎差异 / inspect 
 - **发版**：推送 `v*` 标签即自动构建全部平台并发布 Release——
 
   ```bash
-  git tag v1.1.0 && git push origin v1.1.0
+  git tag v1.3.0 && git push origin v1.3.0
   ```
 
   完成后在 [Releases](https://github.com/jiqing112/sing-box-web-rust/releases) 页面拿到各平台
@@ -163,11 +170,11 @@ cargo test            # 订阅解析 / 双内核渲染 / 引擎差异 / inspect 
 ```bash
 # 在 Release 页找到最新版本，或直接用命令下载（版本号自行替换）
 curl -fsSL -o /tmp/panel.tgz \
-  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.1.0/sing-box-web-rust-1.1.0-linux-amd64.tar.gz
+  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.3.0/sing-box-web-rust-1.1.0-linux-amd64.tar.gz
 
 # 校验完整性（可选但建议）
 curl -fsSL -o /tmp/panel.tgz.sha256 \
-  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.1.0/sing-box-web-rust-1.1.0-linux-amd64.tar.gz.sha256
+  https://github.com/jiqing112/sing-box-web-rust/releases/download/v1.3.0/sing-box-web-rust-1.1.0-linux-amd64.tar.gz.sha256
 cd /tmp && sha256sum -c panel.tgz.sha256
 # 预期输出: sing-box-web-rust-1.1.0-linux-amd64.tar.gz: OK
 
@@ -366,9 +373,7 @@ cd /mnt/usb/singbox && ./panel -data /mnt/usb/singbox/data -listen 0.0.0.0:9090 
 1. 解压 `*-windows-amd64.zip` 到任意目录（路径建议不要带中文）。
 2. 双击 `start.bat`（或命令行 `panel.exe -data .\panel-data -listen 0.0.0.0:9090 -password 你的密码`）。
 3. 浏览器 `http://127.0.0.1:9090`，按 A4 流程配置。
-4. **TUN 模式**：右键「以管理员身份运行」再启 start.bat。sing-box 1.14 起内核**自带 wintun**
-   （运行时解压到 `%TEMP%\wintun.zip`），发行包内也附带一份 `wintun.dll` 作兜底；
-   只有在内核很老、或 wintun 被安全软件清掉时，才需要从 sing-box 官方包手动补一个。
+4. **代理模式页**（见下方专述）：至少开一个「流量入口」，路由模式才会作用于普通流量。
 5. 开机自启：面板里开开关，或跑 `panel.bat autostart-on`（非管理员自动弹 UAC）——
    两者操作的是同一个 SYSTEM 计划任务 `sing-box-panel`，状态互通；
    `/TR` 参数按数组直传，安装路径带空格也能正常注册。
@@ -378,6 +383,20 @@ cd /mnt/usb/singbox && ./panel -data /mnt/usb/singbox/data -listen 0.0.0.0:9090 
 （退出与 Ctrl+C 同为优雅退出，自动停核心、撤代理规则）。托盘状态 3 秒刷新；
 不想要托盘用 `-notray` 启动。注意：以 SYSTEM 计划任务开机自启的面板运行在
 会话 0，没有桌面也就没有托盘，属正常现象。
+
+**代理模式页**（仅 Windows；Linux 同页为「透明代理」redirect）：
+- **出口策略：路由模式**——规则分流 / 全局代理 / 全局直连。注意它只对
+  **进入核心的流量**生效，入口没开时普通流量根本不进核心。
+- **流量入口**（两者至少开其一）：
+  - **系统代理**：一键把当前登录用户的 Windows 系统代理指向面板 mixed 端口
+    （`127.0.0.1:7890`，端口随设置联动）。写完广播 WinInet 刷新，Edge/Chrome
+    **免重启即时生效**；关闭自动还原开启前原值（原 ProxyEnable/Server/Override
+    存于 `panel-data/sysproxy-state.json`）。面板以 SYSTEM 计划任务运行时，
+    自动定位到交互会话真实用户 hive 写入（console 无登录用户时枚举 RDP Active
+    会话），日志明确记录写到哪个用户；普通用户面板直写 HKCU。
+  - **TUN 虚拟网卡**：接管整机流量（含不走系统代理的程序），需管理员。
+- **状态提示条**：四态实时提示——全关（警示「路由模式不生效」）/ 仅系统代理 /
+  仅 TUN / 双开（提示冗余）。
 
 **panel.bat 管理脚本**：双击 = 智能默认——未运行则**后台隐藏启动**（无黑窗，
 仅托盘 + 自动开网页，脚本窗口自关），已运行则弹管理菜单。命令行直跑：
@@ -389,8 +408,8 @@ start.bat 双击同为后台常驻；两者脚本均为 GBK 编码（中文 Wind
 
 - 密码来源优先级：命令行 `-password` > 环境变量 `PANEL_PASSWORD` > `panel.conf` >
   全新面板未提供密码时进入网页首次初始化流程。
-- `panel.conf` 的 `username` 与 `password` **都留空** = 关闭登录（打开端口直接进首页），
-  只在内网可信环境使用；只留空 password = 保持现有密码。
+- **关闭登录**只能用面板内「设置 → 允许免密码访问」开关（`panel.conf` 不再承担
+  此语义；全新面板未提供密码时进入网页首次初始化流程）。
 - 面板自带登录限速（连续 5 次失败锁 30 秒，逐次翻倍至 15 分钟）与 Bearer token 会话（7 天）。
 - 暴露公网：务必改强密码，或保持 `127.0.0.1` 监听 + 反向代理加鉴权。
 
