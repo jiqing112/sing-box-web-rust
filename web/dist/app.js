@@ -280,6 +280,7 @@ function logout() {
   }
   trafficWS = null;
   connWS = null;
+  connRowMap.clear();
   showLogin();
 }
 
@@ -955,24 +956,23 @@ function renderLogs() {
 
 /* ------------------------------------------------------------ render: connections */
 
-function renderConns() {
-  const q = ($('#connSearch')?.value || '').toLowerCase();
-  const rows = state.conns.filter((c) => {
-    if (!q) return true;
-    const m = c.metadata || {};
-    return (m.host || '').includes(q) || (c.rule || '').includes(q) || (m.destinationIP || '').includes(q);
-  }).slice(0, 200);
+const connRowMap = new Map(); // 连接 id -> 行元素与可变单元格引用（增量渲染用）
 
-  $('#connTable tbody').innerHTML = rows.length ? rows.map((c) => {
-    const m = c.metadata || {};
-    // chains 顺序是 [叶子节点..., 策略组..., 入口]，拼起来看才是完整的出站链路
-    const chain = (c.chains || []).slice(0, 3).join(' → ') || '—';
-    const out = (c.chains || []).slice(-1)[0] || '—';
-    const target = m.destinationIP ? `${m.destinationIP}:${m.destinationPort || ''}` : (m.host || '—');
-    const dur = c.start ? Math.floor((Date.now() - new Date(c.start).getTime()) / 1000) : 0;
-    const durTxt = dur > 3600 ? `${Math.floor(dur / 3600)}h ${Math.floor((dur % 3600) / 60)}m`
-      : dur > 60 ? `${Math.floor(dur / 60)}m ${dur % 60}s` : `${Math.max(0, dur)}s`;
-    return `<tr>
+// 行身份指纹：host/链路/规则等静态字段（Clash 会在连接中途补出 host，变了就重建行）
+function connIdKey(c) {
+  const m = c.metadata || {};
+  return [m.host, m.destinationIP, m.destinationPort,
+    (c.chains || []).slice(0, 3).join('>'), (c.chains || []).slice(-1)[0],
+    c.rule, m.network].join('|');
+}
+
+function buildConnRow(c) {
+  const m = c.metadata || {};
+  const chain = (c.chains || []).slice(0, 3).join(' → ') || '—';
+  const out = (c.chains || []).slice(-1)[0] || '—';
+  const target = m.destinationIP ? `${m.destinationIP}:${m.destinationPort || ''}` : (m.host || '—');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
       <td><div class="cell-main"><span class="conn-ic ${out === 'direct' ? 'direct' : 'proxy'}">
         ${out === 'direct'
           ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h16M14 6l6 6-6 6"/></svg>'
@@ -982,11 +982,64 @@ function renderConns() {
       <td><span class="dim">${esc(target)}</span></td>
       <td><div class="chain-cell">${esc(stripFlag(chain))}</div><div class="rule-cell">${esc(c.rule || 'final')}</div></td>
       <td><span class="badge ${out === 'direct' ? '' : 'lime'}">${esc(m.network || 'tcp')}</span></td>
-      <td class="t-right"><span class="conn-rate right-auto"><span class="up">↑</span>${fmtBytes(c.upload || 0)}</span></td>
-      <td class="t-right"><span class="conn-rate right-auto"><span class="dn">↓</span>${fmtBytes(c.download || 0)}</span></td>
-      <td><span class="dim num">${durTxt}</span></td>
-    </tr>`;
-  }).join('') : `<tr><td colspan="7" class="empty-cell">暂无连接</td></tr>`;
+      <td class="t-right"><span class="conn-rate right-auto"><span class="up">↑</span><span class="rv-up"></span></span></td>
+      <td class="t-right"><span class="conn-rate right-auto"><span class="dn">↓</span><span class="rv-dn"></span></span></td>
+      <td><span class="dim num"><span class="rv-dur"></span></span></td>`;
+  return {
+    tr, key: connIdKey(c),
+    up: tr.querySelector('.rv-up'),
+    dn: tr.querySelector('.rv-dn'),
+    dur: tr.querySelector('.rv-dur'),
+  };
+}
+
+function renderConns() {
+  const q = ($('#connSearch')?.value || '').toLowerCase();
+  const rows = state.conns.filter((c) => {
+    if (!q) return true;
+    const m = c.metadata || {};
+    return (m.host || '').includes(q) || (c.rule || '').includes(q) || (m.destinationIP || '').includes(q);
+  }).slice(0, 200);
+
+  const tbody = $('#connTable tbody');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-cell">暂无连接</td></tr>`;
+    connRowMap.clear();
+  } else {
+    if (!connRowMap.size) tbody.innerHTML = ''; // 清掉空态行
+    const liveIds = new Set(state.conns.map((c) => c.id));
+    const visibleIds = new Set();
+    for (const c of rows) {
+      let e = connRowMap.get(c.id);
+      if (!e) {
+        e = buildConnRow(c);
+        connRowMap.set(c.id, e);
+      } else if (e.key !== connIdKey(c)) {
+        // host 后到等身份字段变化：整行重建，原位替换
+        const fresh = buildConnRow(c);
+        e.tr.replaceWith(fresh.tr);
+        Object.assign(e, fresh);
+      }
+      // 每帧只有三个格子会变：上行 / 下行 / 时长
+      e.up.textContent = fmtBytes(c.upload || 0);
+      e.dn.textContent = fmtBytes(c.download || 0);
+      const dur = c.start ? Math.floor((Date.now() - new Date(c.start).getTime()) / 1000) : 0;
+      e.dur.textContent = dur > 3600 ? `${Math.floor(dur / 3600)}h ${Math.floor((dur % 3600) / 60)}m`
+        : dur > 60 ? `${Math.floor(dur / 60)}m ${dur % 60}s` : `${Math.max(0, dur)}s`;
+      visibleIds.add(c.id);
+      tbody.appendChild(e.tr); // 已存在则移动 → 保持过滤后的顺序
+    }
+    for (const [id, e] of connRowMap) {
+      if (!liveIds.has(id)) {
+        e.tr.remove();
+        connRowMap.delete(id);
+      } else if (!visibleIds.has(id)) {
+        e.tr.style.display = 'none'; // 被搜索过滤掉：保留行，只隐藏
+      } else if (e.tr.style.display === 'none') {
+        e.tr.style.display = '';
+      }
+    }
+  }
 
   $('#connCount').textContent = `${rows.length} / 200`;
   $('#statConns').textContent = state.conns.length;
@@ -1144,9 +1197,12 @@ function connectTraffic() {
         state.traffic.downHist.push(state.traffic.down);
         if (state.traffic.upHist.length > 48) state.traffic.upHist.shift();
         if (state.traffic.downHist.length > 48) state.traffic.downHist.shift();
-        drawChart();
-        renderTrafficStats();
-        renderSparklines();
+        // 后台标签页：数据照收（图表/统计在回前台时一次性补齐）
+        if (!document.hidden) {
+          drawChart();
+          renderTrafficStats();
+          renderSparklines();
+        }
       } catch (_) {}
     };
     ws.onopen = () => { retry = 1000; };
@@ -1171,7 +1227,7 @@ function startConnFallback() {
     try {
       const d = await api('/api/v1/clash/connections');
       state.conns = (d.connections || []).slice(0, 200);
-      if (!state.paused) renderConns();
+      if (!state.paused && !document.hidden) renderConns();
     } catch (_) {}
   }, 2000);
 }
@@ -1196,7 +1252,7 @@ function connectConnections() {
         connLastFrame = Date.now();
         if (!state.paused && Array.isArray(d.connections)) {
           state.conns = d.connections.slice(0, 200);
-          renderConns();
+          if (!document.hidden) renderConns();
         }
       } catch (_) {}
     };
@@ -1211,6 +1267,17 @@ function connectConnections() {
   };
   open();
 }
+
+// 后台标签页暂停了重渲染（数据照收），回到前台一次性补齐
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !state.status) return;
+  renderStatus();
+  renderTrafficStats();
+  drawChart();
+  renderSparklines();
+  renderConns();
+  if (logsVisible()) loadLogs();
+});
 
 /* ------------------------------------------------------------ actions */
 
