@@ -1954,6 +1954,68 @@ $('#asPanelSwitch').onclick = async () => {
   }
 };
 
+// —— 面板自更新（关于卡）——
+async function loadUpdateStatus() {
+  const badge = $('#updBadge');
+  const btn = $('#updateBtn');
+  if (!badge || !btn) return;
+  badge.textContent = '检查中…';
+  try {
+    const d = await api('/api/v1/update');
+    if (!d.supported) { badge.textContent = '不支持'; badge.className = 'badge'; btn.style.display = 'none'; return; }
+    if (d.has_update) {
+      badge.textContent = `可更新到 v${d.latest}`;
+      badge.className = 'badge amber';
+      btn.textContent = `更新到 v${d.latest}`;
+      btn.dataset.ready = d.latest;
+    } else {
+      badge.textContent = `已是最新 v${d.current}`;
+      badge.className = 'badge lime';
+      btn.textContent = '检查更新';
+      delete btn.dataset.ready;
+    }
+  } catch (e) {
+    badge.textContent = '检查失败';
+    badge.className = 'badge red';
+  }
+  btn.disabled = false;
+}
+
+$('#updateBtn').onclick = async () => {
+  const btn = $('#updateBtn');
+  if (btn.dataset.ready) {
+    const ver = btn.dataset.ready;
+    const ok = await confirmDialog({
+      title: `更新面板到 v${ver}？`,
+      body: '自动下载并替换面板二进制，随后面板自动重启（核心会短暂中断，几秒内自动拉起），页面稍后恢复。',
+      confirm: '更新并重启'
+    });
+    if (!ok) return;
+    btn.disabled = true;
+    badge.textContent = '更新中…';
+    badge.className = 'badge amber';
+    try {
+      await api('/api/v1/update', { method: 'POST' });
+      toast('ok', `面板已更新到 v${ver}`, '面板重启中，页面将在几秒后自动恢复…');
+      // 轮询等新面板起来，然后整页刷新（拿到新版本号与新前端）
+      const poll = setInterval(() => {
+        fetch('/api/v1/auth/status').then((r) => {
+          if (r.ok) { clearInterval(poll); location.reload(); }
+        }).catch(() => {});
+      }, 2000);
+      setTimeout(() => { clearInterval(poll); location.reload(); }, 60000);
+    } catch (e) {
+      toast('err', '更新失败', e.message);
+      btn.disabled = false;
+      loadUpdateStatus();
+    }
+  } else {
+    btn.disabled = true;
+    badge.textContent = '检查中…';
+    await loadUpdateStatus();
+  }
+};
+
 /* ------------------------------------------------------------ router */
 
 const PAGE_META = {

@@ -10,6 +10,9 @@ pub struct PanelConf {
     pub listen: String,
     pub username: String,
     pub password: String,
+    /// 数据目录（可选）：panel.conf 写 data=<路径> 可固化数据目录，
+    /// 防止忘传/误传 -data 跑错目录。优先级：命令行 -data > 本键 > 默认。
+    pub data: String,
     pub username_set: bool,
     pub password_set: bool,
 }
@@ -40,6 +43,7 @@ pub fn load_panel_conf() -> PanelConf {
         let v = v.trim();
         match k.as_str() {
             "listen" => c.listen = v.to_string(),
+            "data" => c.data = v.to_string(),
             "username" => {
                 c.username = v.to_string();
                 c.username_set = true;
@@ -112,6 +116,10 @@ fn write_panel_conf_template(path: &Path) {
 
 # 面板监听地址，例如 127.0.0.1:9090（仅本机访问）或 0.0.0.0:9090（局域网可访问）
 listen=127.0.0.1:9090
+
+# 数据目录（可选，默认 exe 同目录的 panel-data；Linux 安装版为 /opt/sing-box-panel/data）。
+# 写 data=<路径> 可固化数据目录，防止忘传 -data 参数时跑到别的目录。
+# data=面板数据
 
 # 登录用户名/密码。
 # - 首次启动打开面板网页时会要求设置登录账户密码（用户名默认用这里的 username）；

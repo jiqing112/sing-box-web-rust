@@ -14,6 +14,7 @@ mod platform;
 mod store;
 mod subscription;
 mod sysproxy;
+mod update;
 mod supervisor;
 mod supervisor_sys;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -300,6 +301,22 @@ async fn run() -> i32 {
     let args = Args::parse();
     let env = |k: &str| std::env::var(k).unwrap_or_default();
 
+    // 清理上次自动更新留下的残留（panel.exe.old / panel.update.*）
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = std::fs::remove_file(dir.join("panel.exe.old"));
+            let _ = std::fs::remove_file(dir.join("panel.update.panel.exe"));
+            let _ = std::fs::remove_file(dir.join("panel.update.wintun.dll"));
+            // 下载中断的残缺包删掉；已完整的包保留（下次 POST 直接复用，不重新下载）
+            let update_zip = dir.join("panel.update.zip");
+            #[cfg(windows)]
+            if update_zip.exists() && !crate::update::zip_has_eocd(&update_zip) {
+                let _ = std::fs::remove_file(&update_zip);
+            }
+            let _ = std::fs::remove_file(dir.join("panel.update.tmp"));
+        }
+    }
+
     // 命令行显式指定 -listen 时，面板里的修改只能临时生效。
     let listen_pinned = args.listen.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
 
@@ -313,7 +330,15 @@ async fn run() -> i32 {
         listen_addr = "127.0.0.1:9090".into();
     }
 
-    let mut data_dir = args.data.clone().map(PathBuf::from).unwrap_or_else(default_data_dir);
+    // 数据目录三级优先：命令行 -data > panel.conf 的 data= > 内置默认。
+    // （panel.conf 已在上方加载，此处直接取；统一约定后所有来源都指向 panel-data）
+    let mut data_dir = if let Some(d) = args.data.as_ref().filter(|s| !s.is_empty()) {
+        PathBuf::from(d)
+    } else if !conf.data.is_empty() {
+        PathBuf::from(&conf.data)
+    } else {
+        default_data_dir()
+    };
     // 数据目录统一成绝对路径：渲染出的 cache_file.path、mihomo 的 -d、
     // 子进程工作目录都以它为准。
     if let Ok(abs) = data_dir.canonicalize() {
@@ -340,6 +365,14 @@ async fn run() -> i32 {
             return 1;
         }
     };
+    // 首次运行防呆：数据目录全新（settings/subs 都不存在）时醒目提示，
+    // 避免「换了个目录跑 → 空面板」被误当成数据丢失。
+    if !data_dir.join("settings.json").exists() && !data_dir.join("subs.json").exists() {
+        eprintln!(
+            "提示: 数据目录 {} 为空（全新安装）。如需接续旧数据，请用 -data 指向原数据目录后重启。",
+            data_dir.display()
+        );
+    }
 
     let mut settings = st.settings();
     settings.listen = listen_addr.clone();

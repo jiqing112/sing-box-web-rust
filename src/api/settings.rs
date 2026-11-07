@@ -654,6 +654,56 @@ impl Server {
         Self::h_sysproxy_get(State(app), headers).await
     }
 
+    /* ------------------------------------------------------------ update（面板自更新） */
+
+    pub(crate) async fn h_update_get(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let http = reqwest::Client::builder()
+            .user_agent("sing-box-web-panel")
+            .build()
+            .unwrap_or_default();
+        match crate::update::check_latest(&http).await {
+            Ok(st) => json_ok(json!({
+                "current": st.current,
+                "latest": st.latest,
+                "has_update": st.has_update,
+                "supported": st.supported,
+                "asset": st.asset,
+            })),
+            Err(e) => json_ok(json!({
+                "current": crate::api::VERSION,
+                "latest": "",
+                "has_update": false,
+                "supported": crate::update::platform_artifact().is_some(),
+                "error": e,
+            })),
+        }
+    }
+
+    pub(crate) async fn h_update_set(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let http = reqwest::Client::builder()
+            .user_agent("sing-box-web-panel")
+            .build()
+            .unwrap_or_default();
+        let set = app.store.settings();
+        let mixed_port = if set.mixed_port > 0 { set.mixed_port as u16 } else { 7890 };
+        match crate::update::perform_update(&http, &app.sup, app.store.dir(), mixed_port).await {
+            Ok(tag) => json_ok(json!({"ok": true, "restarting": true, "version": tag})),
+            Err(e) => err_json(StatusCode::BAD_REQUEST, "update_failed", &e),
+        }
+    }
+
     /* ------------------------------------------------------------ autostart */
 
     pub(crate) async fn h_autostart_get(

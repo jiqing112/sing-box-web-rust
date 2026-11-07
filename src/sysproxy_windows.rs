@@ -155,34 +155,6 @@ fn enumerate_active_sessions() -> Result<Vec<u32>, ()> {
     }
 }
 
-/// 枚举 WTS 找第一个 Active 会话（console 无用户时覆盖 RDP 会话）。
-fn enumerate_active_session() -> Option<u32> {
-    unsafe {
-        let mut ptr: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
-        let mut count: u32 = 0;
-        if WTSEnumerateSessionsW(
-            WTS_CURRENT_SERVER,
-            0,
-            1,
-            &mut ptr as *mut *mut WTS_SESSION_INFOW,
-            &mut count,
-        ) == 0
-        {
-            return None;
-        }
-        let mut found = None;
-        for i in 0..count as usize {
-            let si = ptr.add(i).read();
-            if si.State == WTSActive && si.SessionId != 0 {
-                found = Some(si.SessionId);
-                break;
-            }
-        }
-        WTSFreeMemory(ptr as *mut core::ffi::c_void);
-        found
-    }
-}
-
 fn session_user(session: u32) -> String {
     unsafe {
         let mut name = String::new();

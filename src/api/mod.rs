@@ -28,7 +28,7 @@ use crate::supervisor::Supervisor;
 use crate::tproxy;
 
 /// 面板版本。前端从 /status 读取。
-    pub const VERSION: &str = "1.3.1";
+    pub const VERSION: &str = "1.4.0";
 
 /// 覆盖「校验 + 重启 + 探活」全过程；mihomo 首次校验会下载 geo 数据。
 pub const APPLY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -190,6 +190,7 @@ impl Server {
             )
             .route("/api/v1/tun", get(Self::h_tun_get).put(Self::h_tun_set))
             .route("/api/v1/sysproxy", get(Self::h_sysproxy_get).put(Self::h_sysproxy_set))
+            .route("/api/v1/update", get(Self::h_update_get).post(Self::h_update_set))
             .route(
                 "/api/v1/autostart",
                 get(Self::h_autostart_get).put(Self::h_autostart_set),

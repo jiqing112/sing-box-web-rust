@@ -24,8 +24,13 @@ x86_64 / arm64 / mipsel(软浮点) 三架构可用。
 ## 快速开始
 
 ```sh
-./panel -data ./data -listen 0.0.0.0:9090 -password your-pass
+./panel -listen 0.0.0.0:9090 -password your-pass
 ```
+
+> 数据目录默认在 exe 同目录的 `panel-data`（Linux 安装版为
+> `/opt/sing-box-panel/data`），可用 `-data` 覆盖；也可在 panel.conf 里写
+> `data=<路径>` 固化。首次启动时若数据目录为空，日志会明确提示（全新安装），
+> 避免换目录启动时误以为数据丢失。
 
 - 默认监听 `127.0.0.1:9090`；首次启动打开网页会要求设置登录账户密码，
   `-password`/`PANEL_PASSWORD`/panel.conf 的 `password=` 提供密码则跳过网页初始化。
