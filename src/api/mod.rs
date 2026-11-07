@@ -28,7 +28,7 @@ use crate::supervisor::Supervisor;
 use crate::tproxy;
 
 /// 面板版本。前端从 /status 读取。
-    pub const VERSION: &str = "1.3.0";
+    pub const VERSION: &str = "1.3.1";
 
 /// 覆盖「校验 + 重启 + 探活」全过程；mihomo 首次校验会下载 geo 数据。
 pub const APPLY_TIMEOUT: Duration = Duration::from_secs(120);

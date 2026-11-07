@@ -22,6 +22,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             artifact: linux-arm64
             kernel_arch: linux-arm64
+            split: true
           # MIPS 小路由（MT7621 / Cudy AC1200 等）。
           # mipsel 是 Tier 3 目标：需要 nightly + build-std + musl 交叉工具链。
           # continue-on-error：mipsel 构建失败不影响主流平台发版。
@@ -30,6 +31,7 @@ jobs:
             artifact: linux-mipsle
             kernel_arch: mipsle-softfloat
             mipsel: true
+            split: true
             continue-on-error: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -131,32 +133,44 @@ jobs:
         run: |
           set -ex
           VERSION="${GITHUB_REF_NAME#v}"
-          NAME="sing-box-web-rust-${VERSION}-${{ matrix.artifact }}"
-          mkdir -p "dist/$NAME"
-          cp "$BIN" "dist/$NAME/panel${{ runner.os == 'Windows' && '.exe' || '' }}"
-          cp pkg/sing-box* "dist/$NAME/" 2>/dev/null || true
-          if [ -f pkg/mihomo ]; then cp pkg/mihomo "dist/$NAME/"; fi
-          if [ -f pkg/mihomo.exe ]; then cp pkg/mihomo.exe "dist/$NAME/"; fi
-          if [ -f pkg/wintun.dll ]; then cp pkg/wintun.dll "dist/$NAME/"; fi
-          cp -r deploy/* "dist/$NAME/"
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "${NAME}.zip" "$NAME"
+          BASE="sing-box-web-rust-${VERSION}-${{ matrix.artifact }}"
+          PANEL="panel${{ runner.os == 'Windows' && '.exe' || '' }}"
+
+          # mk <完整包名> [内核文件...]：组一个发行包并归档。
+          # 带内核参数时从 pkg/ 取（内核按 matrix 平台下载）。
+          mk() {
+            local pkg="$1"; shift
+            d="dist/$pkg"
+            mkdir -p "$d"
+            cp "$BIN" "$d/$PANEL"
+            chmod +x "$d/$PANEL" 2>/dev/null || true
+            for c in "$@"; do
+              cp pkg/$c* "$d/"
+              chmod +x "$d/$c"* 2>/dev/null || true
+            done
+            if [ -f pkg/wintun.dll ]; then cp pkg/wintun.dll "$d/"; fi
+            cp -r deploy/* "$d/"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              (cd dist && 7z a "$pkg.zip" "$pkg" >/dev/null)
+            else
+              (cd dist && tar -czf "$pkg.tar.gz" "$pkg")
+            fi
+          }
+
+          if [ "${{ matrix.split }}" = "true" ]; then
+            # 路由器/小 ROM 版：单内核分包。双内核解压 150MB+，128MB ROM 放不下；
+            # 两个包里 panel 二进制完全相同，只随附的内核不同。
+            mk "${BASE}-with-sing-box" sing-box
+            mk "${BASE}-with-mihomo" mihomo
           else
-            chmod +x "$NAME/panel" "$NAME/sing-box" "$NAME/mihomo" 2>/dev/null || true
-            tar -czf "${NAME}.tar.gz" "$NAME"
+            # x86 版：双内核，包名以 -dual 体现
+            mk "${BASE}-dual" sing-box mihomo
           fi
-          cd ..
-          if [ -f "dist/${NAME}.tar.gz" ]; then
-            FILE="dist/${NAME}.tar.gz"
-          elif [ -f "dist/${NAME}.zip" ]; then
-            FILE="dist/${NAME}.zip"
-          else
-            echo "package not produced" >&2
-            ls -la dist >&2
-            exit 2
-          fi
-          sha256sum "$FILE" > "${FILE}.sha256"
+
+          for f in dist/*.tar.gz dist/*.zip; do
+            [ -e "$f" ] && sha256sum "$f" > "${f}.sha256"
+          done
+          ls -la dist
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

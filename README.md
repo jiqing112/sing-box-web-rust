@@ -121,12 +121,18 @@ cargo test            # 订阅解析 / 双内核渲染 / 引擎差异 / inspect 
   构建产物上传为 workflow artifact（不打 Release），适合验证构建改动。
 - **产物矩阵**：
 
-  | 产物 | 面板 | 内置内核 | 适用 |
+  | 产物 | 面板 | 随包内核 | 适用 |
   | --- | --- | --- | --- |
-  | `*-linux-amd64.tar.gz` | x86_64 musl 静态 | sing-box + mihomo | x86 服务器 / NAS / 软路由 |
-  | `*-linux-arm64.tar.gz` | arm64 musl 静态 | sing-box + mihomo | MT7981（AX3000 系）、ARM 盒子 |
-  | `*-linux-mipsle.tar.gz` | mipsel musl 软浮点 | sing-box + mihomo (softfloat) | MT7621（Cudy AC1200 等 MIPS 老路由） |
-  | `*-windows-amd64.zip` | x64 | sing-box.exe + mihomo.exe | Windows（TUN 需管理员） |
+  | `*-linux-amd64-dual.tar.gz` | x86_64 musl 静态 | sing-box + mihomo | x86 服务器 / NAS / 软路由（双内核） |
+  | `*-linux-arm64-dual.tar.gz` | arm64 musl 静态 | sing-box + mihomo | MT7981（AX3000 系）、ARM 盒子（双内核） |
+  | `*-linux-mipsle-with-sing-box.tar.gz` | mipsel musl 软浮点 | 仅 sing-box (softfloat) | MT7621 / MT7981 等 MIPS 小 ROM 路由 |
+  | `*-linux-mipsle-with-mihomo.tar.gz` | mipsel musl 软浮点 | 仅 mihomo (softfloat) | 同上，偏好 mihomo 的 |
+  | `*-windows-amd64-dual.zip` | x64 | sing-box.exe + mihomo.exe | Windows（TUN 需管理员） |
+
+  **包名即内容**：`-dual` = 双内核都随包（x86/Windows，ROM 不紧张）；`-with-sing-box` /
+  `-with-mihomo` = 单内核路由器包（128MB 级 ROM 放不下双内核解压的 150MB+，面板二进制
+  在两个 mipsle 包里完全相同，只随附的内核不同）。想换内核：换对应包，或从内核
+  官方 Release 下载单文件放进面板目录即可。
 
   每个包内含：`panel`（面板二进制）、两个内核、`install.sh`、`panel.conf` 模板、
   `sing-box-panel.service`、`start.bat`（Windows 包）。
