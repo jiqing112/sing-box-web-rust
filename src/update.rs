@@ -16,6 +16,10 @@
 
 use std::path::{Path, PathBuf};
 
+// unix 侧的 ChanReader/TarReader 在模块层用到 Read trait
+#[cfg(unix)]
+use std::io::Read;
+
 pub const REPO: &str = "jiqing112/sing-box-web-rust";
 
 /// 当前平台在 Releases 里的产物标识（包名中间那段）。不支持的平台返回 None。
@@ -296,11 +300,15 @@ async fn stage_from_release(
     data_dir: &Path,
     mixed_port: u16,
 ) -> Result<PathBuf, String> {
-    // .sha256 先取（小文件），拿期望哈希（直连失败走 mixed 重试）
+    // .sha256 先取（小文件），拿期望哈希（直连失败走 mixed 重试）。
+    // 仅 Windows 整包校验用得到；Linux 流式抽取读不到完整包，不取。
+    #[cfg(windows)]
     let expect = match fetch_expected_sha(http, url).await {
         Some(x) => Some(x),
         None => fetch_expected_sha(&proxied_client(http, mixed_port), url).await,
     };
+    #[cfg(not(windows))]
+    let expect: Option<String> = None;
 
     #[cfg(windows)]
     {
@@ -310,7 +318,7 @@ async fn stage_from_release(
     #[cfg(unix)]
     {
         // Linux：reqwest 流式（先直连，失败走 mixed 代理重取）gzip+tar 增量抽取
-        let mut resp = match http
+        let resp = match http
             .get(url)
             .header("User-Agent", "sing-box-web-panel")
             .timeout(std::time::Duration::from_secs(600))
@@ -334,7 +342,7 @@ async fn stage_from_release(
                 resp.status()
             ));
         }
-        stage_platform_unix(resp, &expect, data_dir).await
+        stage_platform_unix(resp, data_dir).await
     }
 }
 
@@ -572,13 +580,66 @@ fn swap_and_restart(staged: &Path) -> Result<(), String> {
 #[cfg(unix)]
 async fn stage_platform_unix(
     resp: reqwest::Response,
-    expect_sha: &Option<String>,
     _data_dir: &Path,
-    _mixed_port: u16,
 ) -> Result<PathBuf, String> {
     use flate2::read::GzDecoder;
     use sha2::Digest;
     use std::io::Read;
+    use std::sync::mpsc;
+
+    // async 响应体不实现 std::io::Read，抽个「管道」适配：后台任务把响应 chunk
+    // 推进有界通道（拉流天然背压），抽取在阻塞线程里从通道流式读——
+    // 路由器上依旧只落盘 panel 本身（~9MB），不缓存整包。
+    let (tx, rx) = mpsc::sync_channel::<Result<Vec<u8>, String>>(32);
+    tokio::spawn(async move {
+        let mut resp = resp;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(c)) => {
+                    if tx.send(Ok(c.to_vec())).is_err() {
+                        break; // 消费端已退出
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+
+    struct ChanReader {
+        rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+        pending: Vec<u8>,
+        off: usize,
+    }
+    impl Read for ChanReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                if self.off < self.pending.len() {
+                    let n = (self.pending.len() - self.off).min(buf.len());
+                    buf[..n].copy_from_slice(&self.pending[self.off..self.off + n]);
+                    self.off += n;
+                    if self.off == self.pending.len() {
+                        self.pending = Vec::new();
+                        self.off = 0;
+                    }
+                    return Ok(n);
+                }
+                match self.rx.recv() {
+                    Ok(Ok(chunk)) => {
+                        self.pending = chunk;
+                        self.off = 0;
+                    }
+                    Ok(Err(e)) => {
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    }
+                    Err(_) => return Ok(0), // 通道关闭且无数据 = 流结束
+                }
+            }
+        }
+    }
 
     let exe_dir = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -587,46 +648,52 @@ async fn stage_platform_unix(
         .unwrap_or_else(|| PathBuf::from("."));
     let staged = exe_dir.join("panel.update.tmp");
 
-    let mut gz = GzDecoder::new(resp);
-    let mut hasher = sha2::Sha256::new();
-    // 哈希的是压缩字节：用 Tee 包一层再喂 gzip
-    struct Tee<A, B> {
-        a: A,
-        b: B,
-    }
-    impl<A: Read, B: std::io::Write> Read for Tee<A, B> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.a.read(buf)?;
-            self.b.write_all(&buf[..n])?;
-            Ok(n)
+    // 抽取是同步阻塞 IO，放阻塞线程，不占 tokio worker
+    tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+        let mut gz = GzDecoder::new(ChanReader { rx, pending: Vec::new(), off: 0 });
+        let mut hasher = sha2::Sha256::new();
+        // 哈希的是压缩字节：用 Tee 包一层再喂 gzip（面板抽到即停读，不做整体校验）
+        struct Tee<A, B> {
+            a: A,
+            b: B,
         }
-    }
-    let mut hasher_ref = hasher.by_ref();
-    let tee = Tee {
-        a: &mut gz,
-        b: &mut hasher_ref,
-    };
-    let mut ar = TarReader::new(tee);
+        impl<A: Read, B: std::io::Write> Read for Tee<A, B> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.a.read(buf)?;
+                self.b.write_all(&buf[..n])?;
+                Ok(n)
+            }
+        }
+        let tee = Tee {
+            a: &mut gz,
+            b: &mut hasher,
+        };
+        let mut ar = TarReader::new(tee);
 
-    let mut wrote_panel = false;
-    while let Some((name, typeflag, size)) = ar.next_header()? {
-        if (typeflag == b'0' || typeflag == 0) && (name.ends_with("/panel") || name == "panel") {
-            let mut out = std::fs::File::create(&staged).map_err(|e| e.to_string())?;
-            ar.copy_body(size, &mut out)?;
-            wrote_panel = true;
-        } else {
-            ar.skip_body(size)?;
+        let mut wrote_panel = false;
+        while let Some((name, typeflag, size)) = ar.next_header()? {
+            if (typeflag == b'0' || typeflag == 0) && (name.ends_with("/panel") || name == "panel")
+            {
+                let mut out =
+                    std::fs::File::create(&staged).map_err(|e| e.to_string())?;
+                ar.copy_body(size, &mut out)?;
+                wrote_panel = true;
+            } else {
+                ar.skip_body(size)?;
+            }
+            if wrote_panel {
+                break; // 面板二进制已拿到，后续条目（内核等）不用解
+            }
         }
-        if wrote_panel {
-            break; // 面板二进制已拿到，后续条目（内核等）不用解
-        }
-    }
-    let _ = hasher; // 哈希在 next_header/copy 中持续累加压缩流
+        let _ = hasher; // 哈希在 next_header/copy 中持续累加（当前未比对）
 
-    if !wrote_panel {
-        return Err("更新包里没有 panel 二进制".into());
-    }
-    Ok(staged)
+        if !wrote_panel {
+            return Err("更新包里没有 panel 二进制".into());
+        }
+        Ok(staged)
+    })
+    .await
+    .map_err(|e| format!("更新抽取任务失败: {e}"))?
 }
 
 #[cfg(unix)]
