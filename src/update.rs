@@ -169,8 +169,24 @@ pub async fn check_latest(http: &reqwest::Client) -> Result<UpdateStatus, String
     Ok(make_status(tag, format!("sing-box-web-rust-{tag_for_asset}-{artifact}.{ext}")))
 }
 
-fn make_status(tag: String, asset: String) -> UpdateStatus {
-    let current = current_version().to_string();
+/// 检查更新：直连优先，失败走本机 mixed 入站回落（面板自己就是代理工具，
+/// 核心节点可达 GitHub 时检查即可用）。设置页徽标与完整更新流程共用。
+pub(crate) async fn check_with_fallback(
+    http: &reqwest::Client,
+    mixed_port: u16,
+) -> Result<UpdateStatus, String> {
+    match check_latest(http).await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let proxied = proxied_client(http, mixed_port);
+            check_latest(&proxied)
+                .await
+                .map_err(|e2| format!("{e}；走本机代理重试仍失败: {e2}"))
+        }
+    }
+}
+
+fn make_status(tag: String, asset: String) -> UpdateStatus {    let current = current_version().to_string();
     let has_update = ver_newer(&tag, &current);
     UpdateStatus {
         current,

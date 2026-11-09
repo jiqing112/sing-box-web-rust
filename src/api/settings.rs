@@ -667,7 +667,9 @@ impl Server {
             .user_agent("sing-box-web-panel")
             .build()
             .unwrap_or_default();
-        match crate::update::check_latest(&http).await {
+        let set = app.store.settings();
+        let mixed_port = if set.mixed_port > 0 { set.mixed_port as u16 } else { 7890 };
+        match crate::update::check_with_fallback(&http, mixed_port).await {
             Ok(st) => json_ok(json!({
                 "current": st.current,
                 "latest": st.latest,
@@ -692,13 +694,29 @@ impl Server {
         if let Some(resp) = app.authed(&headers) {
             return resp;
         }
+        // 并发防护：同一时刻只允许一个更新任务（两个页面同时点更新会双下载并
+        // 竞争交换文件）
+        static UPD_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        use std::sync::atomic::Ordering;
+        if UPD_BUSY
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return err_json(
+                StatusCode::CONFLICT,
+                "update_busy",
+                "已有更新任务正在进行，请稍候",
+            );
+        }
         let http = reqwest::Client::builder()
             .user_agent("sing-box-web-panel")
             .build()
             .unwrap_or_default();
         let set = app.store.settings();
         let mixed_port = if set.mixed_port > 0 { set.mixed_port as u16 } else { 7890 };
-        match crate::update::perform_update(&http, &app.sup, app.store.dir(), mixed_port).await {
+        let r = crate::update::perform_update(&http, &app.sup, app.store.dir(), mixed_port).await;
+        UPD_BUSY.store(false, Ordering::SeqCst);
+        match r {
             Ok(tag) => json_ok(json!({"ok": true, "restarting": true, "version": tag})),
             Err(e) => err_json(StatusCode::BAD_REQUEST, "update_failed", &e),
         }

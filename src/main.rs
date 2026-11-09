@@ -301,10 +301,10 @@ async fn run() -> i32 {
     let args = Args::parse();
     let env = |k: &str| std::env::var(k).unwrap_or_default();
 
-    // 清理上次自动更新留下的残留（panel.exe.old / panel.update.*）
+    // 清理上次自动更新留下的残留（panel.update.*；panel.exe.old 是回滚备份，
+    // 保留到下次更新时由交换逻辑清理）
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let _ = std::fs::remove_file(dir.join("panel.exe.old"));
             let _ = std::fs::remove_file(dir.join("panel.update.panel.exe"));
             let _ = std::fs::remove_file(dir.join("panel.update.wintun.dll"));
             // 下载中断的残缺包删掉；已完整的包保留（下次 POST 直接复用，不重新下载）
