@@ -518,7 +518,7 @@ function renderSubs() {
   grid.innerHTML = state.subs.map((s, i) => {
     const pct = s.usage_total ? Math.min(100, (s.usage_used / s.usage_total) * 100) : 0;
     const hours = s.interval_hours > 0 ? s.interval_hours : 24;
-    return `<div class="card sub-card">
+    return `<div class="card sub-card" data-sub="${s.id}" title="点击编辑订阅">
       <div class="sub-head">
         <div class="sub-avatar ${tones[i % 3]}">${esc(s.name.slice(0, 1).toUpperCase())}</div>
         <div class="sub-id">
@@ -558,6 +558,13 @@ function renderSubs() {
 
   $$('[data-refresh]').forEach((b) => (b.onclick = () => refreshSub(b.dataset.refresh, b)));
   $$('[data-del]').forEach((b) => (b.onclick = () => deleteSub(b.dataset.del)));
+  // 单击订阅卡片弹出编辑（按钮 / 开关 / 输入框不触发）
+  $$('.sub-card[data-sub]').forEach((card) => {
+    card.onclick = (e) => {
+      if (e.target.closest('button, input')) return;
+      openEditSub(card.dataset.sub);
+    };
+  });
   $$('[data-auto]').forEach((b) => (b.onclick = () => setSubAuto(b.dataset.auto, !b.classList.contains('on'))));
   $$('[data-save-hours]').forEach((b) => (b.onclick = () => setSubHours(b.dataset.saveHours)));
   $$('[data-hours]').forEach((inp) => (inp.onkeydown = (e) => {
@@ -682,6 +689,75 @@ function openAddSub() {
       toast('err', '添加失败', e.message);
       $('#subOk').disabled = false;
       $('#subOk').textContent = '拉取并解析';
+    }
+  };
+}
+
+function openEditSub(id) {
+  const s = state.subs.find((x) => x.id === id);
+  if (!s) return;
+  $('#dialog').innerHTML = `
+    <div class="dialog-hd">
+      <h3>编辑订阅</h3>
+    </div>
+    <div class="dialog-bd">
+      <div class="field"><label>订阅名称</label><input class="input" id="subName" value="${esc(s.name)}" placeholder="例如：主订阅" /></div>
+      <div class="field"><label>订阅链接</label><input class="input" id="subUrl" value="${esc(s.url)}" placeholder="https://…" /></div>
+      <div class="field">
+        <label>自动更新</label>
+        <div class="form-switch">
+          <button type="button" class="switch sm ${s.auto ? 'on' : ''}" id="subAuto" role="switch" aria-checked="${!!s.auto}"></button>
+          <span class="k">每 <input class="input sub-hours" id="subHours" type="number" min="1" max="720" step="1" value="${s.interval_hours > 0 ? s.interval_hours : 24}" ${s.auto ? '' : 'disabled'} /> 小时</span>
+        </div>
+      </div>
+      <div class="field"><span class="k">修改链接后保存会立即重新拉取该订阅的节点</span></div>
+    </div>
+    <div class="dialog-ft">
+      <button class="btn" onclick="closeDialog(false)">取消</button>
+      <button class="btn primary" id="subOk">保存修改</button>
+    </div>`;
+  $('#dialogOverlay').classList.add('open');
+  const autoBtn = $('#subAuto');
+  const hoursInput = $('#subHours');
+  autoBtn.onclick = () => {
+    const on = autoBtn.classList.toggle('on');
+    autoBtn.setAttribute('aria-checked', String(on));
+    hoursInput.disabled = !on;
+  };
+  $('#subOk').onclick = async () => {
+    const name = $('#subName').value.trim();
+    const url = $('#subUrl').value.trim();
+    if (!url) { toast('err', '缺少订阅链接'); return; }
+    const auto = autoBtn.classList.contains('on');
+    const hours = parseInt(hoursInput.value, 10);
+    if (!Number.isFinite(hours) || hours < 1 || hours > 720) {
+      toast('err', '间隔无效', '请输入 1-720 小时');
+      return;
+    }
+    const patch = {};
+    if (name && name !== s.name) patch.name = name;
+    if (url !== s.url) patch.url = url;
+    if (auto !== s.auto) patch.auto = auto;
+    if (auto && hours !== s.interval_hours) patch.interval_hours = hours;
+    if (!Object.keys(patch).length) { closeDialog(false); return; }
+    const urlChanged = 'url' in patch;
+    $('#subOk').disabled = true;
+    $('#subOk').textContent = '保存中…';
+    try {
+      await api(`/api/v1/subscriptions/${id}`, { method: 'PUT', body: JSON.stringify(patch) });
+      closeDialog(true);
+      if (urlChanged) {
+        toast('ok', '已保存', '链接已修改，正在重新拉取节点…');
+        await refreshSub(id);
+      } else {
+        toast('ok', '已保存', '订阅设置已更新');
+        await loadSubs();
+        renderSubs();
+      }
+    } catch (e) {
+      toast('err', '保存失败', e.message);
+      $('#subOk').disabled = false;
+      $('#subOk').textContent = '保存修改';
     }
   };
 }

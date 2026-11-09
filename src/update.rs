@@ -257,7 +257,7 @@ pub async fn perform_update(
     // —— 替换 + 调度重启 ——
     swap_and_restart(&staged)?;
     eprintln!(
-        "自动更新: 面板已替换为 v{tag}，将在 1 秒内重启（页面稍后自动恢复）"
+        "自动更新: 面板已替换为 {tag}，将在 1 秒内重启（页面稍后自动恢复）"
     );
     Ok(tag)
 }
@@ -368,26 +368,35 @@ async fn stage_platform_windows(
     // 系统自带 curl.exe（Win10 1803+，schannel TLS）最稳：先走本机 mixed 代理，
     // 再试直连；两者都失败再回退 reqwest 流式。
     let mixed = format!("http://127.0.0.1:{mixed_port}");
-    // 代理与直连交替多轮，-C - 断点续传（节点断流是常态，一次下完 55MB 不现实）
-    let attempts = vec![
-        vec![format!("-x {mixed}")],
-        vec![],
-        vec![format!("-x {mixed}")],
-        vec![],
-    ];
+    // 代理与直连交替多轮，-C - 断点续传（节点断流是常态，一次下完 55MB 不现实）。
+    // 注意 -x 和代理地址必须是两个独立参数：合成一个会被 Windows 引号包裹，
+    // curl 解析不出代理（退出码 3/5），静默退化成直连。
+    let attempts = [Some(mixed.as_str()), None, Some(mixed.as_str()), None];
     // 已有完整 zip（上次更新中断后保留/上轮 POST 已下完）→ 直接跳过下载
     let zip_ready = zip_has_eocd(&zip_path);
     let mut eocd_ok = zip_ready;
     let mut last_err = String::new();
-    for (i, flags) in attempts.iter().enumerate() {
+    for (i, via_proxy) in attempts.iter().enumerate() {
         if zip_ready {
             break;
         }
         let resume = zip_path.exists();
         let mut cmd = std::process::Command::new("curl.exe");
-        cmd.arg("-L").arg("-f").arg("--retry").arg("2")
-            .arg("--connect-timeout").arg("15")
-            .args(flags);
+        cmd.arg("-L")
+            .arg("-f")
+            .arg("--retry")
+            .arg("2")
+            .arg("--connect-timeout")
+            .arg("15")
+            // 30 秒内速度低于 1KB/s 视为断流，立刻退出换下一条通道
+            //（否则断流的连接会无限挂起，堵死整个轮换）
+            .arg("--speed-limit")
+            .arg("1024")
+            .arg("--speed-time")
+            .arg("30");
+        if let Some(proxy) = via_proxy {
+            cmd.arg("-x").arg(proxy);
+        }
         if resume {
             cmd.arg("-C").arg("-");
         }
@@ -512,8 +521,12 @@ fn swap_and_restart(staged: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(&staged_wt);
     }
 
-    // exe 路径去掉 canonicalize 的 \?\ 前缀（CreateProcess 不接受 verbatim 路径）
-    let exe_str = cur.to_string_lossy().replace("\\?\\", "");
+    // exe 路径去掉 canonicalize 的 \\?\ 前缀（CreateProcess 不接受 verbatim 路径）。
+    // 注意：字面量 "\\\\?\\" 才是 4 字符的 \\?\——写成 "\\?\\" 只有 3 字符，
+    // 会匹配到中间留下一个开头反斜杠（\C:\...），CreateProcess 报 os error 123。
+    const VERBATIM: &str = "\\\\?\\";
+    let s = cur.to_string_lossy();
+    let exe_str = s.strip_prefix(VERBATIM).unwrap_or(&s).to_string();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = exe_str;
     std::thread::spawn(move || {
@@ -526,7 +539,8 @@ fn swap_and_restart(staged: &Path) -> Result<(), String> {
         match cmd.spawn() {
             Ok(child) => {
                 eprintln!("自动更新: 新面板已启动 (pid {})", child.id());
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                // 立即退出让出监听端口：新面板启动很快，老进程晚退 300ms 会让
+                // 新面板 bind 撞上 10048（端口占用）直接退出
                 std::process::exit(0);
             }
             Err(e) => {

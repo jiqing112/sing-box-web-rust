@@ -914,7 +914,7 @@ a { color: inherit; text-decoration: none; }
 /* ------------------------------------------------------------ subscription cards */
 
 .sub-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
-.sub-card { padding: 15px 16px; display: flex; flex-direction: column; gap: 12px; transition: border-color 0.2s; }
+.sub-card { padding: 15px 16px; display: flex; flex-direction: column; gap: 12px; transition: border-color 0.2s; cursor: pointer; }
 .sub-card:hover { border-color: var(--line-2); }
 .sub-head { display: flex; align-items: flex-start; gap: 10px; }
 .sub-id { min-width: 0; flex: 1; }
