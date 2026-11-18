@@ -324,7 +324,11 @@ async function boot() {
   }
   $('#login').classList.remove('open');
   $('#app').style.display = '';
-  await Promise.all([loadSubs(), loadNodes(), loadConfig(), loadLogs()]);
+  // 任一 load 失败（网络抖动/面板刚重启）不能让 boot 中途夭折：
+  // 否则壳已显示却既无渲染也无轮询，页面看着登录了实际永远不更新
+  const results = await Promise.allSettled([loadSubs(), loadNodes(), loadConfig(), loadLogs()]);
+  const failed = results.filter((r) => r.status === 'rejected').length;
+  if (failed) toast('info', '部分数据加载失败', `有 ${failed} 项初始化数据未取到，轮询稍后会自动补上`);
   renderAll();
   connectTraffic();
   connectConnections();
@@ -369,9 +373,11 @@ async function loadConfig() {
 }
 
 async function loadLogs() {
-  const d = await api('/api/v1/logs');
-  state.logs = d.lines || [];
-  renderLogs();
+  try {
+    const d = await api('/api/v1/logs');
+    state.logs = d.lines || [];
+    renderLogs();
+  } catch (e) { /* 瞬时失败下轮再拉，别让 pollLogs 每 3 秒抛一次未处理 rejection */ }
 }
 
 // 日志只在「看得到日志框」的页面里轮询：/logs 每次最多返回 400 行，
@@ -768,10 +774,12 @@ let nodeFilter = { group: 'all', q: '' };
 
 function filteredNodes() {
   return state.nodes.filter((n) => {
-    if (nodeFilter.group !== 'all' && n.region !== nodeFilter.group) return false;
+    // 分组键在渲染时用 'OTHER' 兜底（renderNodes），过滤侧必须用同一归一化，
+    // 否则「OTHER N」标签页永远匹配不到任何节点
+    if (nodeFilter.group !== 'all' && (n.region || 'OTHER') !== nodeFilter.group) return false;
     if (nodeFilter.q) {
       const q = nodeFilter.q.toLowerCase();
-      return n.name.toLowerCase().includes(q) || n.type.includes(q) || n.server.toLowerCase().includes(q);
+      return n.name.toLowerCase().includes(q) || n.type.toLowerCase().includes(q) || n.server.toLowerCase().includes(q);
     }
     return true;
   });
@@ -783,7 +791,7 @@ function renderNodes() {
   state.nodes.forEach((n) => { const r = n.region || 'OTHER'; groups[r] = (groups[r] || 0) + 1; });
   const tabs = [`<button class="${nodeFilter.group === 'all' ? 'on' : ''}" data-group="all">全部 ${state.nodes.length}</button>`]
     .concat(Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([r, c]) =>
-      `<button class="${nodeFilter.group === r ? 'on' : ''}" data-group="${r}">${r} ${c}</button>`));
+      `<button class="${nodeFilter.group === r ? 'on' : ''}" data-group="${esc(r)}">${esc(r)} ${c}</button>`));
   $('#nodeGroups').innerHTML = tabs.join('');
   $$('#nodeGroups button').forEach((b) => (b.onclick = () => {
     nodeFilter.group = b.dataset.group;
@@ -1074,7 +1082,10 @@ function renderConns() {
   const rows = state.conns.filter((c) => {
     if (!q) return true;
     const m = c.metadata || {};
-    return (m.host || '').includes(q) || (c.rule || '').includes(q) || (m.destinationIP || '').includes(q);
+    // 查询词是小写的，字段也得转小写，否则 "Google" 之类永远搜不到
+    return (m.host || '').toLowerCase().includes(q)
+      || (c.rule || '').toLowerCase().includes(q)
+      || (m.destinationIP || '').toLowerCase().includes(q);
   }).slice(0, 200);
 
   const tbody = $('#connTable tbody');
@@ -1297,14 +1308,19 @@ let connLastFrame = 0;
 // 避免个别网络环境下 WebSocket 静默失效导致连接页永远是空的。
 function startConnFallback() {
   if (connFallbackTimer) clearInterval(connFallbackTimer);
+  let fallbackBusy = false;
   connFallbackTimer = setInterval(async () => {
     if (!wsAllowed() || state.paused) return;
     if (Date.now() - connLastFrame < 4000) return;
+    // 上一次请求还没回来就不叠发：慢响应时旧快照会反过来覆盖新数据
+    if (fallbackBusy) return;
+    fallbackBusy = true;
     try {
       const d = await api('/api/v1/clash/connections');
       state.conns = (d.connections || []).slice(0, 200);
       if (!state.paused && !document.hidden) renderConns();
     } catch (_) {}
+    fallbackBusy = false;
   }, 2000);
 }
 
@@ -1514,7 +1530,7 @@ async function saveLanProxy(kind) {
     confirmBody = '将创建无鉴权开放代理：局域网内任意设备都可免密使用。';
   }
   const ok = await confirmDialog({ title, body: confirmBody, confirm: '保存并应用' });
-  if (!ok) return;
+  if (!ok) return false;
   const btn = isMixed ? $('#lpMixSave') : $('#lpSave');
   btn.disabled = true;
   try {
@@ -1530,8 +1546,10 @@ async function saveLanProxy(kind) {
     toast('ok', '已应用', msg);
     await loadLanProxy();
     await pollStatus();
+    return true;
   } catch (e) {
     toast('err', '保存失败', e.message);
+    return false;
   } finally {
     btn.disabled = false;
   }
@@ -1545,6 +1563,14 @@ $('#lpGen').onclick = () => {
 $('#lpSave').onclick = () => saveLanProxy('lan');
 $('#lpMixSave').onclick = () => saveLanProxy('mixed');
 $('#lpRefresh').onclick = loadLanProxy;
+
+// 局域网代理总开关：此前没有点击处理器，开关拨不动、保存的永远是旧状态
+$('#lpSwitch').onclick = async () => {
+  const sw = $('#lpSwitch');
+  sw.classList.toggle('on');
+  const saved = await saveLanProxy('lan');
+  if (!saved) sw.classList.toggle('on'); // 用户取消：把开关拨回去
+};
 
 // 监听范围切换只改本地选中态，保存时才下发
 $$('#lpMixListenSeg button').forEach((b) => {
@@ -1569,7 +1595,7 @@ $('#dnsSwitch').onclick = async () => {
   if (next) {
     const ok = await confirmDialog({
       title: '接管局域网 DNS？',
-      body: '53 端口查询将劫持到当前内核：<code>' + ((state.tproxy?.cidrs || []).join('  ')) + '</code>',
+      body: '53 端口查询将劫持到当前内核：<code>' + esc((state.tproxy?.cidrs || []).join('  ')) + '</code>',
       confirm: '开始接管'
     });
     if (!ok) return;
@@ -1629,7 +1655,10 @@ $('#tproxySwitch').onclick = async () => {
 
 /* ------------------------------------------------------------ tun */
 
-async function loadTun() {
+// TUN 切换进行中压住轮询重绘（轮询画回旧状态会让用户以为操作失败再点一次）
+let tunBusy = false;
+async function loadTun(force) {
+  if (tunBusy && !force) return;
   try {
     const d = await api('/api/v1/tun');
     state.tun = d;
@@ -1650,8 +1679,12 @@ async function loadTun() {
 }
 
 // —— 系统代理（Windows）——
-async function loadSysproxy() {
+// PUT 进行中时跳过轮询重绘：5 秒一次的轮询会把开关画回旧状态、
+// 清掉「设置中…」，用户就会连点两次
+let sysproxyBusy = false;
+async function loadSysproxy(force) {
   if (isLinux()) return;
+  if (sysproxyBusy && !force) return;
   try {
     const d = await api('/api/v1/sysproxy');
     state.sysproxy = d;
@@ -1672,6 +1705,7 @@ $('#sysproxySwitch').onclick = async () => {
   const badge = $('#sysproxyBadge');
   badge.textContent = '设置中…';
   badge.className = 'badge amber';
+  sysproxyBusy = true;
   try {
     await api('/api/v1/sysproxy', { method: 'PUT', body: JSON.stringify({ enabled: next }) });
     toast(next ? 'ok' : 'info', next ? '系统代理已开启' : '系统代理已关闭',
@@ -1679,7 +1713,8 @@ $('#sysproxySwitch').onclick = async () => {
   } catch (e) {
     toast('err', '设置失败', e.message);
   }
-  await loadSysproxy();
+  await loadSysproxy(true);
+  sysproxyBusy = false;
 };
 
 // 入口（系统代理/TUN）与出口（路由模式）的关系提示条
@@ -1706,6 +1741,7 @@ function updateEntryStatus() {
 }
 
 async function tunToggle() {
+  const sw = $('#tunSwitch2');
   const on = !!state.tun?.running;
   const next = !on;
   const who = isLinux() ? 'root' : '管理员';
@@ -1717,6 +1753,9 @@ async function tunToggle() {
     confirm: next ? '开启 TUN' : '关闭 TUN'
   });
   if (!ok) return;
+  // 切 TUN 要重启核心，耗时数秒：期间禁用开关并压住轮询重绘，防连点
+  sw.disabled = true;
+  tunBusy = true;
   try {
     await api('/api/v1/tun', { method: 'PUT', body: JSON.stringify({ enabled: next }) });
     toast(next ? 'ok' : 'info', next ? 'TUN 已开启' : 'TUN 已关闭',
@@ -1725,7 +1764,11 @@ async function tunToggle() {
     toast('err', '操作失败', e.message);
   }
   // 核心重启后 Clash API/配置落定需要一点时间，稍等再取真实状态
-  setTimeout(loadTun, 1500);
+  setTimeout(async () => {
+    tunBusy = false;
+    await loadTun();
+    sw.disabled = false;
+  }, 1500);
 }
 
 $('#tunSwitch2').onclick = tunToggle;
@@ -2046,6 +2089,12 @@ async function loadUpdateStatus() {
       badge.className = 'badge amber';
       btn.textContent = `更新到 ${vv(d.latest)}`;
       btn.dataset.ready = vv(d.latest);
+    } else if (d.error) {
+      // 后端检查失败也返回 200（error 字段），不能渲染成「已是最新」
+      badge.textContent = '检查失败';
+      badge.className = 'badge red';
+      btn.textContent = '检查更新';
+      delete btn.dataset.ready;
     } else {
       badge.textContent = `已是最新 v${d.current}`;
       badge.className = 'badge lime';

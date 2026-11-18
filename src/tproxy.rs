@@ -135,6 +135,24 @@ fn build(m: &Manager, cidrs: &[String], local: bool, hijack_dns: bool) -> String
     b
 }
 
+/// 校验用户提供的网段：必须是合法的 IPv4 CIDR，防止任意字符串混进 nft 脚本。
+fn validate_cidrs(cidrs: &[String]) -> Result<(), String> {
+    for c in cidrs {
+        let (ip, prefix) = match c.split_once('/') {
+            Some((ip, p)) => (ip, p),
+            None => (c.as_str(), "32"),
+        };
+        if ip.trim().parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(format!("网段格式不正确（应为 a.b.c.d/前缀）: {c}"));
+        }
+        match prefix.trim().parse::<u8>() {
+            Ok(p) if p <= 32 => {}
+            _ => return Err(format!("前缀长度不正确（应为 0-32）: {c}")),
+        }
+    }
+    Ok(())
+}
+
 /// 下发规则：先删旧表再整表重建，保证幂等。
 pub async fn apply(m: &Manager, cidrs: &[String], local: bool, hijack_dns: bool) -> Result<(), String> {
     let _g = m.mu.lock().await;
@@ -142,6 +160,7 @@ pub async fn apply(m: &Manager, cidrs: &[String], local: bool, hijack_dns: bool)
     if cidrs.is_empty() {
         return Err("没有配置任何需要接管的网段".into());
     }
+    validate_cidrs(cidrs)?;
     if local && !local_supported(m) {
         return Err("无法识别面板所在的 cgroup，接管本机流量可能导致回环，已拒绝".into());
     }
@@ -251,7 +270,7 @@ async fn run_nft(m: &Manager, args: &[&str], timeout_secs: u64) -> Result<String
     Ok(text)
 }
 
-async fn run_nft_stdin(m: &Manager, script: &str, _timeout_secs: u64) -> Result<(), String> {
+async fn run_nft_stdin(m: &Manager, script: &str, timeout_secs: u64) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let mut child = Command::new(&m.nft)
         .arg("-f")
@@ -259,13 +278,24 @@ async fn run_nft_stdin(m: &Manager, script: &str, _timeout_secs: u64) -> Result<
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // 超时取消时（wait_with_output future 被 drop）把 nft 一并杀掉
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(script.as_bytes()).await;
         drop(stdin);
     }
-    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    // apply/disable 全程持有互斥锁，nft 卡死必须能在超时后解套
+    let out = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(res) => res.map_err(|e| e.to_string())?,
+        Err(_) => return Err(format!("nft 执行超时（{timeout_secs}s）")),
+    };
     if !out.status.success() {
         let text = format!(
             "{}{}",
@@ -330,7 +360,7 @@ pub fn detect_lan() -> Vec<String> {
         } else {
             u32::MAX << (32 - prefix as u32)
         };
-        let ip_u = u32::from(ip) & mask.to_be();
+        let ip_u = u32::from(ip) & mask;
         let net = std::net::Ipv4Addr::from(ip_u);
         let cidr = format!("{net}/{prefix}");
         if !is_private(&cidr) || seen.contains(&cidr) {

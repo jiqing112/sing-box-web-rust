@@ -366,12 +366,20 @@ fn parse_uri(s: &str) -> Result<Node, String> {
         return parse_vmess(rest);
     }
     let u = Url::parse(s).map_err(|e| e.to_string())?;
+    // 免端口链接的默认端口（hysteria2 官方默认 443；trojan/vless 惯例 443），
+    // 其余格式缺端口直接拒绝——server_port: 0 的节点存下来会卡死整个 apply
     let port: i64 = match u.port() {
         Some(p) => p as i64,
-        None => 0,
+        None => match u.scheme() {
+            "trojan" | "vless" | "hysteria2" => 443,
+            _ => return Err("节点缺少端口".into()),
+        },
     };
     let name = percent_decode(u.fragment().unwrap_or("")).trim().to_string();
     let host = u.host_str().unwrap_or("").to_string();
+    if host.is_empty() {
+        return Err("节点缺少服务器地址".into());
+    }
 
     // scheme 不能直接当 outbound type：ss 在 sing-box 里叫 shadowsocks
     let mut ob = Map::new();
@@ -400,22 +408,61 @@ fn parse_uri(s: &str) -> Result<Node, String> {
             ob.insert("password".into(), json!(username));
         }
         "ss" => {
-            // ss://base64(method:password)@host:port
-            let ui = u.username();
-            if !ui.is_empty() {
-                if let Ok(dec) = base64::engine::general_purpose::STANDARD.decode(pad_b64(&percent_decode(ui))) {
+            // 两种主流格式：
+            // 1) SIP002：ss://base64url(method:password)@host:port —— userinfo
+            //    是整段 base64（URL_SAFE 变体、常无 padding，STANDARD 解不开）；
+            // 2) 明文：ss://method:password@host:port —— url crate 按 RFC3986
+            //    把 userinfo 拆成 username[:password]，要两段拼回去。
+            let up = u.password().unwrap_or("");
+            if username.contains(':') {
+                // userinfo 里就有冒号：明文 method:password
+                if let Some((m, p)) = username.split_once(':') {
+                    ob.insert("method".into(), json!(m));
+                    ob.insert("password".into(), json!(p));
+                }
+            } else if !username.is_empty() && up.is_empty() {
+                // 整段 base64 或 percent 编码的明文
+                let dec_full = percent_decode(u.username());
+                let dec = if dec_full.contains(':') {
+                    Ok(dec_full.into_bytes())
+                } else {
+                    decode_b64_flex(&dec_full)
+                };
+                if let Ok(dec) = dec {
                     let dec = String::from_utf8_lossy(&dec).into_owned();
-                    if let Some((method, pass)) = dec.split_once(':') {
-                        ob.insert("method".into(), json!(method));
-                        ob.insert("password".into(), json!(pass));
+                    if let Some((m, p)) = dec.split_once(':') {
+                        ob.insert("method".into(), json!(m));
+                        ob.insert("password".into(), json!(p));
                     }
                 }
+            } else if !username.is_empty() {
+                // username:password 形态（2022-blake3 常见）
+                ob.insert("method".into(), json!(username));
+                ob.insert("password".into(), json!(percent_decode(up)));
             }
         }
         "hysteria2" => {
             ob.insert("password".into(), json!(username));
+            // obfs 混淆参数：不带上则节点能过 check 但连不上 obfs 服务器
+            let obfs = get("obfs");
+            if !obfs.is_empty() {
+                ob.insert(
+                    "obfs".into(),
+                    json!({"mode": obfs, "password": get("obfs-password")}),
+                );
+            }
         }
         other => return Err(format!("unsupported scheme {other}")),
+    }
+
+    // 缺 method/password 的 shadowsocks 出站过不了 sing-box check，会以
+    // 「启用」状态存下来并卡死整个 apply——解析层直接拒绝（跳过该行）
+    if ob.get("type").and_then(|v| v.as_str()) == Some("shadowsocks") {
+        let m = ob.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        let p = ob.get("password").and_then(|v| v.as_str()).unwrap_or("");
+        if m.is_empty() || p.is_empty() {
+            return Err("ss 节点缺少 method/password（不支持的链接格式）".into());
+        }
     }
 
     let mut tls = Map::new();
@@ -602,6 +649,17 @@ fn pad_b64(s: &str) -> String {
     } else {
         format!("{}{}", s, "=".repeat(4 - m))
     }
+}
+
+/// 兼容三种 base64 变体：标准带 padding、URL-safe 带 padding、URL-safe 无 padding。
+/// 分享链接里三种都常见（SIP002 的 userinfo 用的是 URL-safe 无 padding）。
+fn decode_b64_flex(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::engine::general_purpose as gp;
+    let s = s.trim();
+    gp::STANDARD
+        .decode(pad_b64(s))
+        .or_else(|_| gp::URL_SAFE.decode(pad_b64(s)))
+        .or_else(|_| gp::URL_SAFE_NO_PAD.decode(s))
 }
 
 fn percent_decode(s: &str) -> String {

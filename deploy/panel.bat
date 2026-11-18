@@ -131,7 +131,7 @@ if %errorlevel%==0 (
 )
 if not exist "%~dp0sing-box.exe" echo [提示] 同目录未找到 sing-box.exe，核心将无法启动（详见 README）。
 echo 正在后台启动面板...
-powershell -NoProfile -Command "Start-Process -FilePath '%~dp0panel.exe' -WorkingDirectory '%~dp0' -ArgumentList '-data','%~dp0panel-data' -WindowStyle Hidden"
+powershell -NoProfile -Command "Start-Process -FilePath '%~dp0panel.exe' -WorkingDirectory '%~dp0' -ArgumentList '-data','\"%~dp0panel-data\"' -WindowStyle Hidden"
 ping -n 3 127.0.0.1 >nul
 call :is_running
 if %errorlevel%==0 (
@@ -141,18 +141,6 @@ if %errorlevel%==0 (
   exit /b 1
 )
 exit /b 0
-
-rem 启动失败的最常见原因：监听端口被占用（本机已有别的面板实例）
-:diag_start_fail
-for /f "delims=: tokens=2" %%p in ("%LISTEN%") do set "PORT=%%p"
-netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1 && (
-  echo 启动失败：端口 %PORT% 已被占用——本机很可能已在运行另一个面板实例。
-  echo   两台并存：把 panel.conf 的 listen= 改成其他端口后再运行本脚本；
-  echo   替换旧版：先停掉旧面板（或卸载它的自启任务）再启动。
-) || (
-  echo 启动失败：请直接运行 panel.exe 查看报错信息。
-)
-exit /b 1
 
 :do_stop
 call :is_running

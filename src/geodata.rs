@@ -407,25 +407,36 @@ fn extract_embedded(gz: &[u8], dst: &Path, min_size: i64) -> Result<i64, String>
     use std::io::Read;
     let mut r = MultiGzDecoder::new(gz);
     let tmp = dst.with_extension("tmp");
-    let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    let mut buf = [0u8; 32 << 10];
-    let mut written: i64 = 0;
-    loop {
-        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
+    let res = (|| -> Result<i64, String> {
+        let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 32 << 10];
+        let mut written: i64 = 0;
+        loop {
+            let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            use std::io::Write;
+            out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            written += n as i64;
         }
-        use std::io::Write;
-        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        written += n as i64;
-    }
-    out.sync_all().map_err(|e| e.to_string())?;
-    drop(out);
-    // 压缩后的大小不能拿来比阈值，只能校验解压后的字节数
-    if written < min_size {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("内置副本过小（{written} 字节）"));
-    }
+        out.sync_all().map_err(|e| e.to_string())?;
+        drop(out);
+        // 压缩后的大小不能拿来比阈值，只能校验解压后的字节数
+        if written < min_size {
+            return Err(format!("内置副本过小（{written} 字节）"));
+        }
+        Ok(written)
+    })();
+    let written = match res {
+        Ok(w) => w,
+        Err(e) => {
+            // 任何失败路径都清掉半截 tmp，避免残留在数据目录
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    // rename 保证 mihomo 不会读到写了一半的文件
     std::fs::rename(&tmp, dst).map_err(|e| e.to_string())?;
     Ok(written)
 }

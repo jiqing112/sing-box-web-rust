@@ -125,7 +125,10 @@ pub fn version_args(s: &str) -> &'static [&'static str] {
 /// 返回版本号（原始输出首行），失败时返回 Err(输出或错误)。
 pub async fn probe(bin: &str, eng: &str) -> Result<String, String> {
     let mut cmd = Command::new(bin);
-    cmd.args(version_args(eng)).stdin(Stdio::null());
+    cmd.args(version_args(eng))
+        .stdin(Stdio::null())
+        // 超时取消时（output future 被 drop）把子进程一并杀掉，避免孤儿进程
+        .kill_on_drop(true);
     let fut = cmd.output();
     let out = match tokio::time::timeout(Duration::from_secs(5), fut).await {
         Ok(Ok(o)) => o,

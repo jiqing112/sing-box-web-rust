@@ -12,7 +12,8 @@
 //   procd 无感知）→ 新映像启动时核心按配置拉起。
 //
 // 安全约束：更新源固定为本仓库 Releases，URL 全部由代码按平台拼接，不接受
-// 任何外部传入地址；下载流式计算 sha256 与发布 .sha256 比对，不符即丢弃。
+// 任何外部传入地址；下载流式计算 sha256 与发布 .sha256 比对，不符即丢弃
+// （.sha256 取不到时才放行，并明确提示本次未校验）。
 
 use std::path::{Path, PathBuf};
 
@@ -64,18 +65,41 @@ fn current_version() -> &'static str {
     crate::api::VERSION
 }
 
-/// 版本比较：v1.3.10 > v1.3.9（按数值逐段比较）
-fn ver_tuple(s: &str) -> (u64, u64, u64) {
+/// 版本比较：v1.3.10 > v1.3.9（按数值逐段比较）。带后缀的预发布
+/// （v1.4.1-beta.2）数值上低于同号正式版；段数不齐按 0 补齐；
+/// 后缀里的数字段也参与比较（beta.2 > beta.1）。
+fn ver_segments(s: &str) -> (Vec<u64>, bool) {
     let t = s.trim_start_matches('v');
-    let mut it = t.split('.');
-    let major = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    let minor = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    let patch = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    (major, minor, patch)
+    let (body, suffix) = match t.split_once('-') {
+        Some((b, suf)) => (b, Some(suf)),
+        None => (t, None),
+    };
+    fn leading_num(seg: &str) -> u64 {
+        let digits: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().unwrap_or(0)
+    }
+    let mut segs: Vec<u64> = body.split('.').map(leading_num).collect();
+    if let Some(suf) = suffix {
+        for part in suf.split(['.', '_']) {
+            segs.push(leading_num(part));
+        }
+    }
+    (segs, suffix.is_some())
 }
 
-fn ver_newer(latest: &str, current: &str) -> bool {
-    ver_tuple(latest) > ver_tuple(current)
+pub(crate) fn ver_newer(latest: &str, current: &str) -> bool {
+    let (a, a_pre) = ver_segments(latest);
+    let (b, b_pre) = ver_segments(current);
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    // 数值完全相同：正式版 > 预发布
+    !a_pre && b_pre
 }
 
 /// 检查最新版本。API 优先（带资产列表）；API 不可达（国内路由器常态）时
@@ -168,9 +192,36 @@ pub async fn check_latest(http: &reqwest::Client) -> Result<UpdateStatus, String
         .filter(|t| t.starts_with('v'))
         .ok_or_else(|| format!("检查更新失败：无法解析最新版本（{final_url}）"))?
         .to_string();
-    let tag_for_asset = tag.clone();
+    let ver = tag.trim_start_matches('v').to_string();
     let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
-    Ok(make_status(tag, format!("sing-box-web-rust-{tag_for_asset}-{artifact}.{ext}")))
+    // 产物名必须与 release.yml 一致（tag 不带 v）：x86 双内核包是 -dual，
+    // 路由器分包（arm64/mipsle）是 -with-sing-box / -with-mihomo——按平台
+    // 命名规则排候选顺序，HEAD 探测谁存在用谁；都探测不到再退回首选名。
+    let base = format!("sing-box-web-rust-{ver}-{artifact}");
+    let mut candidates = vec![
+        format!("{base}-dual.{ext}"),
+        format!("{base}-with-sing-box.{ext}"),
+        format!("{base}.{ext}"),
+    ];
+    if !artifact.ends_with("amd64") {
+        candidates.swap(0, 1);
+    }
+    let mut chosen = candidates[0].clone();
+    for name in &candidates {
+        let probe = http
+            .head(download_url(&tag, name))
+            .header("User-Agent", "sing-box-web-panel")
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await;
+        if let Ok(r) = probe {
+            if r.status().is_success() {
+                chosen = name.clone();
+                break;
+            }
+        }
+    }
+    Ok(make_status(tag, chosen))
 }
 
 /// 检查更新：直连优先，失败走本机 mixed 入站回落（面板自己就是代理工具，
@@ -265,7 +316,7 @@ pub async fn perform_update(
     let url = download_url(&tag, &asset);
 
     // —— 下载 + 流式校验 + 顺路抽取面板二进制（路由器上只落盘 ~9MB，不缓存整包）——
-    let staged = stage_from_release(http, &url, &asset, data_dir, mixed_port).await?;
+    let staged = stage_from_release(http, &tag, &url, &asset, data_dir, mixed_port).await?;
 
     // —— 停核心（释放 cache.db / TUN / 端口）——
     if sup.running() {
@@ -295,25 +346,24 @@ fn sha256_hex_file(path: &Path) -> Result<String, String> {
 
 async fn stage_from_release(
     http: &reqwest::Client,
+    tag: &str,
     url: &str,
     asset: &str,
     data_dir: &Path,
     mixed_port: u16,
 ) -> Result<PathBuf, String> {
     // .sha256 先取（小文件），拿期望哈希（直连失败走 mixed 重试）。
-    // 仅 Windows 整包校验用得到；Linux 流式抽取读不到完整包，不取。
-    #[cfg(windows)]
+    // 两个平台都校验：Windows 校验整包 zip；Linux 流式抽取会把压缩流
+    // 读到 EOF，同样能对整包 tar.gz 做哈希。
     let expect = match fetch_expected_sha(http, url).await {
         Some(x) => Some(x),
         None => fetch_expected_sha(&proxied_client(http, mixed_port), url).await,
     };
-    #[cfg(not(windows))]
-    let expect: Option<String> = None;
 
     #[cfg(windows)]
     {
         // Windows：curl.exe 双通道下载整包 zip，PowerShell 选择性解出 panel
-        return stage_platform_windows(url, asset, data_dir, mixed_port, &expect).await;
+        return stage_platform_windows(tag, url, asset, data_dir, mixed_port, &expect).await;
     }
     #[cfg(unix)]
     {
@@ -342,7 +392,7 @@ async fn stage_from_release(
                 resp.status()
             ));
         }
-        stage_platform_unix(resp, data_dir).await
+        stage_platform_unix(resp, data_dir, &expect).await
     }
 }
 
@@ -371,6 +421,7 @@ async fn fetch_expected_sha(http: &reqwest::Client, asset_url: &str) -> Option<S
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 async fn stage_platform_windows(
+    tag: &str,
     url: &str,
     _asset: &str,
     _data_dir: &Path,
@@ -386,7 +437,15 @@ async fn stage_platform_windows(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let zip_path = exe_dir.join("panel.update.zip");
+    // zip 文件名绑定版本号：上次更新中断残留的完整包只对同一 tag 复用，
+    // 防止旧版本包被当成「新版本」装上（sha256 拿不到时无从分辨）。
+    let safe_tag: String = tag
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    let zip_path = exe_dir.join(format!("panel.update.{safe_tag}.zip"));
+    // 旧版本残留的完整 zip 已无用（不会再装旧版），清掉省出 flash/磁盘
+    let _ = std::fs::remove_file(exe_dir.join("panel.update.zip"));
 
     // 面板进程拿着 reqwest 下载 55MB 会撞上 body 解码错误（HTTP/2 + 代理链路），
     // 系统自带 curl.exe（Win10 1803+，schannel TLS）最稳：先走本机 mixed 代理，
@@ -537,7 +596,16 @@ fn swap_and_restart(staged: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(&old);
     // 运行中的 exe 可以改名（不能覆盖）：panel.exe → panel.exe.old
     std::fs::rename(&cur, &old).map_err(|e| format!("替换面板失败（改名旧文件）: {e}"))?;
-    std::fs::rename(staged, &cur).map_err(|e| format!("替换面板失败（放入新文件）: {e}"))?;
+    if let Err(e) = std::fs::rename(staged, &cur) {
+        // 第二步失败必须把旧文件放回去：此刻 panel.exe 已不在磁盘上，
+        // 不还原的话下次启动（重启/崩溃/服务拉起）就是「砖」。
+        return Err(match std::fs::rename(&old, &cur) {
+            Ok(()) => format!("替换面板失败（放入新文件）: {e}；已还原旧版 panel.exe"),
+            Err(e2) => format!(
+                "替换面板失败（放入新文件）: {e}；还原旧版也失败（{e2}），请手动把 panel.exe.old 改名为 panel.exe"
+            ),
+        });
+    }
     // wintun.dll 更新（核心已停，无占用）
     let staged_wt = staged.with_file_name("panel.update.wintun.dll");
     if staged_wt.exists() {
@@ -581,6 +649,7 @@ fn swap_and_restart(staged: &Path) -> Result<(), String> {
 async fn stage_platform_unix(
     resp: reqwest::Response,
     _data_dir: &Path,
+    expect_sha: &Option<String>,
 ) -> Result<PathBuf, String> {
     use flate2::read::GzDecoder;
     use sha2::Digest;
@@ -650,9 +719,9 @@ async fn stage_platform_unix(
 
     // 抽取是同步阻塞 IO，放阻塞线程，不占 tokio worker
     tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-        let mut gz = GzDecoder::new(ChanReader { rx, pending: Vec::new(), off: 0 });
         let mut hasher = sha2::Sha256::new();
-        // 哈希的是压缩字节：用 Tee 包一层再喂 gzip（面板抽到即停读，不做整体校验）
+        // 哈希的是压缩字节：Tee 包住 ChanReader 再喂 gzip（与 .sha256 对整包
+        // tar.gz 计算一致）。读到 EOF 才有完整包哈希，顺带 gzip CRC 校验兜底截断。
         struct Tee<A, B> {
             a: A,
             b: B,
@@ -664,31 +733,44 @@ async fn stage_platform_unix(
                 Ok(n)
             }
         }
-        let tee = Tee {
-            a: &mut gz,
-            b: &mut hasher,
-        };
-        let mut ar = TarReader::new(tee);
+        {
+            let tee = Tee {
+                a: ChanReader { rx, pending: Vec::new(), off: 0 },
+                b: &mut hasher,
+            };
+            let mut gz = GzDecoder::new(tee);
+            let mut ar = TarReader::new(&mut gz);
 
-        let mut wrote_panel = false;
-        while let Some((name, typeflag, size)) = ar.next_header()? {
-            if (typeflag == b'0' || typeflag == 0) && (name.ends_with("/panel") || name == "panel")
-            {
-                let mut out =
-                    std::fs::File::create(&staged).map_err(|e| e.to_string())?;
-                ar.copy_body(size, &mut out)?;
-                wrote_panel = true;
-            } else {
-                ar.skip_body(size)?;
+            let mut wrote_panel = false;
+            while let Some((name, typeflag, size)) = ar.next_header()? {
+                if (typeflag == b'0' || typeflag == 0)
+                    && (name.ends_with("/panel") || name == "panel")
+                {
+                    let mut out =
+                        std::fs::File::create(&staged).map_err(|e| e.to_string())?;
+                    ar.copy_body(size, &mut out)?;
+                    wrote_panel = true;
+                } else {
+                    ar.skip_body(size)?;
+                }
+                // 不提前 break：读到 EOF，截断的包在 gzip 尾部校验处报错，
+                // 整包哈希也才完整（面板二进制已拿到，其余条目只是跳过）
             }
-            if wrote_panel {
-                break; // 面板二进制已拿到，后续条目（内核等）不用解
+            if !wrote_panel {
+                return Err("更新包里没有 panel 二进制".into());
             }
         }
-        let _ = hasher; // 哈希在 next_header/copy 中持续累加（当前未比对）
-
-        if !wrote_panel {
-            return Err("更新包里没有 panel 二进制".into());
+        let got = format!("{:x}", hasher.finalize());
+        match expect_sha {
+            Some(expect) => {
+                if got != *expect {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err("更新包校验失败（sha256 不符），已丢弃。请重试或手动更新".into());
+                }
+            }
+            None => {
+                eprintln!("自动更新: 未获取到 .sha256（GitHub 连接不稳），本次跳过整包校验");
+            }
         }
         Ok(staged)
     })

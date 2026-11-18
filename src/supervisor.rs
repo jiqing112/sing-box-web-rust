@@ -217,7 +217,7 @@ impl Supervisor {
         let sup = self.clone();
         tokio::spawn(async move {
             let exit = child.wait().await;
-            let stopping;
+            let mut should_handle_crash = false;
             {
                 let mut st = sup.st.lock().unwrap();
                 if st.gen == gen {
@@ -225,8 +225,10 @@ impl Supervisor {
                     if let Err(e) = &exit {
                         st.last_err = e.to_string();
                     }
+                    // 只有当前代才计入崩溃：stop/restart 已把核心换代处理，
+                    // 旧代看护读到新一代的 stopping 会误把主动停止当崩溃。
+                    should_handle_crash = !st.stopping;
                 }
-                stopping = st.stopping;
                 let err_text = match &exit {
                     Ok(s) if s.success() => "clean".to_string(),
                     Ok(s) => format!("exit status {}", s.code().unwrap_or(-1)),
@@ -236,14 +238,14 @@ impl Supervisor {
                 sup.logs
                     .push(format!("[panel] {} exited: {err_text}", engine::label(&eng)));
             }
-            if !stopping {
-                sup.handle_crash();
+            if should_handle_crash {
+                sup.handle_crash(gen);
             }
         });
         Ok(())
     }
 
-    fn handle_crash(self: &Arc<Self>) {
+    fn handle_crash(self: &Arc<Self>, gen: u64) {
         let n = {
             let mut st = self.st.lock().unwrap();
             let now = std::time::Instant::now();
@@ -263,8 +265,13 @@ impl Supervisor {
         let sup = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(RESTART_DELAY).await;
-            let stopping = sup.st.lock().unwrap().stopping;
-            if !stopping {
+            // 按代复核：延迟期间若发生 stop/手动重启（换代），
+            // 本次自动重启作废，避免拉起第二个核心进程。
+            let ok = {
+                let st = sup.st.lock().unwrap();
+                st.gen == gen && !st.stopping
+            };
+            if ok {
                 let _ = sup.start();
             }
         });

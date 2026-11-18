@@ -31,7 +31,9 @@ use crate::tproxy;
     pub const VERSION: &str = "1.4.0";
 
 /// 覆盖「校验 + 重启 + 探活」全过程；mihomo 首次校验会下载 geo 数据。
-pub const APPLY_TIMEOUT: Duration = Duration::from_secs(120);
+/// 最坏路径 90（校验）+ 8（重启）+ 25（探活）≈ 124s，超时会把 apply 半途
+/// cancel 掉，留下「配置已写、核心未启」的中间态——必须大于最坏耗时。
+pub const APPLY_TIMEOUT: Duration = Duration::from_secs(150);
 const TOKEN_TTL: i64 = 7 * 24 * 3600;
 const MAX_TOKENS: usize = 64;
 /// 限制单次测速的节点数，防止超大订阅把面板拖死。
@@ -70,6 +72,10 @@ pub struct Server {
     /// 出口 IP 缓存：(时刻, (ip, 测量路径))；None 表示上次测量失败。
     /// 经 mixed 入站访问 IP 回显服务测得，TTL 内直接复用。
     exit_ip: tokio::sync::Mutex<Option<(std::time::Instant, Option<(String, String)>)>>,
+
+    /// 内核切换/应用的互斥：h_engine_set 要连续改 store→supervisor→applier
+    /// 三处状态，并发切换（双击）或切换与应用并发会把三处指向不同内核。
+    pub(crate) engine_mu: tokio::sync::Mutex<()>,
 
     /// 最近一次 API 请求的时间戳（UnixNano），空闲回收据此判断。
     pub last_req: AtomicI64,
@@ -125,6 +131,7 @@ impl Server {
             router: RwLock::new(None),
             listen_pinned: std::sync::atomic::AtomicBool::new(false),
             exit_ip: tokio::sync::Mutex::new(None),
+            engine_mu: tokio::sync::Mutex::new(()),
             last_req: AtomicI64::new(0),
         })
     }
@@ -996,7 +1003,8 @@ impl Server {
         }
         let auto = inb.get("auto").and_then(|v| v.as_bool()).unwrap_or(true);
         let sub = Subscription {
-            id: format!("s{}", crate::util::unix_millis_now()),
+            // 毫秒时间戳会在同毫秒创建时撞 ID（互相覆盖订阅与节点文件），用随机 id
+            id: format!("s{}", crate::util::rand_hex(6)),
             name,
             url,
             auto,

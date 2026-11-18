@@ -209,3 +209,80 @@ mod clean_path_tests {
         assert_eq!(clean(r"C:\Users\a\.test\d"), "C:/Users/a/.test/d");
     }
 }
+
+#[cfg(test)]
+mod fix_tests {
+    use std::collections::HashSet;
+
+    #[test]
+    fn ver_newer_numeric_and_prerelease() {
+        let vn = crate::update::ver_newer;
+        // 常规数值比较
+        assert!(vn("v1.3.10", "v1.3.9"));
+        assert!(vn("v1.4.0", "v1.3.9"));
+        assert!(!vn("v1.4.0", "v1.4.0"));
+        assert!(!vn("v1.3.9", "v1.3.10"));
+        // 预发布标签：数值段按 0 解析的老实现会漏掉这两类
+        assert!(vn("v1.4.1-beta.2", "v1.4.0"), "beta 也要能升过上一版");
+        assert!(vn("v1.4.10-beta", "v1.4.9"));
+        assert!(vn("v1.4.0.1", "v1.4.0"), "四段热修 tag");
+        // 同号正式版 > 预发布；已是正式版不推荐「升级」到 beta
+        assert!(!vn("v1.4.1-beta", "v1.4.1"));
+        assert!(vn("v1.4.1", "v1.4.1-beta"));
+        // beta 之间的次序
+        assert!(vn("v1.4.1-beta.2", "v1.4.1-beta.1"));
+    }
+
+    #[test]
+    fn ss_uri_variants_all_yield_method_password() {
+        use base64::Engine;
+        let mut reserved = HashSet::new();
+        // SIP002：URL-safe 无 padding 的 base64(method:password)
+        let creds = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(b"aes-128-gcm:pass1");
+        // 明文 method:password 形态
+        let body = format!(
+            "ss://{creds}@1.2.3.4:8388#SS1\nss://aes-128-gcm:pass2@1.2.3.5:8388#SS2\n"
+        );
+        let nodes = crate::subscription::parse::parse(body.as_bytes(), "s1", &[], &mut reserved)
+            .unwrap();
+        assert_eq!(nodes.len(), 2, "两种主流 ss 格式都要能解析");
+        assert_eq!(nodes[0].outbound["method"], "aes-128-gcm");
+        assert_eq!(nodes[0].outbound["password"], "pass1");
+        assert_eq!(nodes[1].outbound["method"], "aes-128-gcm");
+        assert_eq!(nodes[1].outbound["password"], "pass2");
+    }
+
+    #[test]
+    fn unusable_ss_node_is_skipped() {
+        // 解不出 method/password 的 ss 链接直接跳过，不能存成启用状态的废节点
+        let body = b"ss://dGVzdA==@1.2.3.4:8388#bad\n";
+        let mut reserved = HashSet::new();
+        let r = crate::subscription::parse::parse(body, "s1", &[], &mut reserved);
+        match r {
+            Ok(nodes) => assert!(nodes.is_empty()),
+            // 整订阅无一可用时 parse 直接报错——同样不会落盘废节点
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn portless_links_get_default_443() {
+        let body = b"hysteria2://auth@example.com#H1\ntrojan://pass@example.com#T1\n";
+        let mut reserved = HashSet::new();
+        let nodes = crate::subscription::parse::parse(body, "s1", &[], &mut reserved).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].outbound["server_port"], 443);
+        assert_eq!(nodes[1].outbound["server_port"], 443);
+    }
+
+    #[test]
+    fn hysteria2_obfs_params_survive() {
+        let body = b"hysteria2://auth@example.com:443?obfs=salamander&obfs-password=ob&p=1#H1\n";
+        let mut reserved = HashSet::new();
+        let nodes = crate::subscription::parse::parse(body, "s1", &[], &mut reserved).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].outbound["obfs"]["mode"], "salamander");
+        assert_eq!(nodes[0].outbound["obfs"]["password"], "ob");
+    }
+}

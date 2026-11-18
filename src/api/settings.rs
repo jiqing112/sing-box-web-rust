@@ -91,6 +91,9 @@ impl Server {
         if raw.is_empty() {
             return err_json(StatusCode::BAD_REQUEST, "bad_request", "缺少配置内容");
         }
+        // 与内核切换互斥：切换进行中（store/supervisor/applier 换到一半）时
+        // 不能并发 apply，否则可能把新内核渲染的配置应用到旧内核上
+        let _engine_g = app.engine_mu.lock().await;
         let mut note = inb
             .get("note")
             .and_then(|v| v.as_str())
@@ -974,6 +977,15 @@ impl Server {
             }
         }
 
+        // 从这里到函数结束要连续改 store→supervisor→applier 三处状态：
+        // 与并发切换（双击）或手动应用互斥，守卫活到函数返回。
+        let _engine_g = app.engine_mu.lock().await;
+        // 拿到锁后重新核对当前内核：等锁期间可能已有另一个切换完成，
+        // 入口处读到的 cur 已经过期，回滚会恢复到错误的内核
+        let cur = app.engine_name();
+        if target == cur {
+            return json_ok(json!({"ok": true, "engine": cur, "changed": false}));
+        }
         let prev_set = app.store.settings();
         let prev_cfg = app.store.config().unwrap_or_default();
         let mut set = prev_set.clone();

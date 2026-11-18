@@ -3,7 +3,7 @@
 // 声明为直接依赖即可离线编译，零新增 crate。panic=abort 下禁用一切 unwrap。
 // 注意：windows-sys 0.52 的 HWND/HICON/HMENU 均为 isize 别名。
 
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use windows_sys::Win32::Foundation::{POINT, WPARAM};
@@ -43,6 +43,9 @@ struct Shared {
     hwnd: AtomicIsize,
     /// 最近一次成功 ADD 的 nid 副本，气泡/刷新在其上做 NIM_MODIFY
     nid: Mutex<Option<NOTIFYICONDATAW>>,
+    /// hIcon 是否为本进程所建（CreateIconFromResourceEx）。LoadIconW 的
+    /// 系统共享图标绝不能 DestroyIcon。
+    icon_owned: AtomicBool,
     taskbar_created: AtomicU32,
 }
 
@@ -130,6 +133,7 @@ pub fn spawn(
         events: tx,
         hwnd: AtomicIsize::new(0),
         nid: Mutex::new(None),
+        icon_owned: AtomicBool::new(false),
         taskbar_created: AtomicU32::new(0),
     });
     if SHARED.set(shared.clone()).is_err() {
@@ -238,7 +242,8 @@ unsafe extern "system" fn tray_wndproc(
 }
 
 /// 解析 .ico 目录取最接近 32px 的条目建 HICON；失败退回系统默认图标。
-unsafe fn load_tray_icon() -> isize {
+/// 返回 (句柄, 是否本进程所建——需要 DestroyIcon)。
+unsafe fn load_tray_icon() -> (isize, bool) {
     if ICO.len() >= 6 {
         let count = u16::from_le_bytes([ICO[4], ICO[5]]) as usize;
         let mut best: Option<(i32, usize, u32)> = None;
@@ -260,11 +265,11 @@ unsafe fn load_tray_icon() -> isize {
         if let Some((_, off, len)) = best {
             let h = CreateIconFromResourceEx(ICO[off..].as_ptr(), len, 1, 0x0003_0000, 32, 32, 0);
             if h != 0 {
-                return h;
+                return (h, true);
             }
         }
     }
-    LoadIconW(0, 32512 as *const u16) // IDI_APPLICATION
+    (LoadIconW(0, 32512 as *const u16), false) // IDI_APPLICATION（共享图标）
 }
 
 unsafe fn add_icon(shared: &Arc<Shared>) {
@@ -272,7 +277,8 @@ unsafe fn add_icon(shared: &Arc<Shared>) {
     if hwnd == 0 {
         return;
     }
-    let hicon = load_tray_icon();
+    let (hicon, owned) = load_tray_icon();
+    shared.icon_owned.store(owned, Ordering::Release);
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
@@ -284,6 +290,10 @@ unsafe fn add_icon(shared: &Arc<Shared>) {
     if Shell_NotifyIconW(NIM_ADD, &nid) != 0 {
         *lock(&shared.nid) = Some(nid);
     } else {
+        // 添加失败也要释放自己建的图标：任务栏未就绪时每次重试都泄漏一个
+        if owned {
+            DestroyIcon(hicon);
+        }
         eprintln!("托盘: 图标添加失败（任务栏可能未就绪）");
     }
 }
@@ -291,7 +301,7 @@ unsafe fn add_icon(shared: &Arc<Shared>) {
 unsafe fn remove_nid(shared: &Arc<Shared>) {
     if let Some(nid) = lock(&shared.nid).take() {
         Shell_NotifyIconW(NIM_DELETE, &nid);
-        if nid.hIcon != 0 {
+        if nid.hIcon != 0 && shared.icon_owned.load(Ordering::Acquire) {
             DestroyIcon(nid.hIcon);
         }
     }

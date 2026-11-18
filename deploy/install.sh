@@ -19,10 +19,14 @@ if systemctl is-active --quiet sing-box-panel 2>/dev/null; then
 fi
 
 install -m 755 "$HERE/panel" "$PREFIX/bin/panel"
-install -m 755 "$HERE/sing-box" /usr/local/bin/sing-box
 
-# mihomo 是可选的第二个内核：包里有就装，没有（老包）就跳过，
-# 面板照常用 sing-box，只是「设置 → 内核」里 mihomo 显示不可用。
+# sing-box 与 mihomo 都是可选内核：分包（-with-sing-box / -with-mihomo）
+# 里只有其一，包里有就装，没有就跳过——set -e 下 install 一个不存在的
+# 文件会让整个脚本半途而废（panel 已装好，service 却没装上）。
+if [ -f "$HERE/sing-box" ]; then
+  install -m 755 "$HERE/sing-box" /usr/local/bin/sing-box
+fi
+
 if [ -f "$HERE/mihomo" ]; then
   install -m 755 "$HERE/mihomo" /usr/local/bin/mihomo
   echo "==> 已安装 mihomo，可在面板「设置 → 内核」里切换"

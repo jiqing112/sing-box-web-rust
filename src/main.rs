@@ -80,6 +80,7 @@ mod clapless {
                     if let Some(v) = &inline {
                         return Some(v.clone());
                     }
+                    // 与 Go flag 一致：取值 flag 无条件取下一个 token
                     *i += 1;
                     argv.get(*i).cloned()
                 };
@@ -93,9 +94,23 @@ mod clapless {
                     "token" => a.token = take_value(&mut i),
                     "password" => a.password = take_value(&mut i),
                     "autostart" => {
-                        let v = take_value(&mut i)
-                            .map(|s| s == "true")
-                            .unwrap_or(true);
+                        // 布尔 flag 按 Go 语义：显式 -autostart=true|false 才取值，
+                        // 裸 -autostart 视为开启且不吞下一个参数
+                        //（-autostart -listen x:y 不会把 -listen 当值吃掉）
+                        let v = if let Some(s) = &inline {
+                            s == "true"
+                        } else {
+                            match argv.get(i + 1) {
+                                Some(s)
+                                    if s.eq_ignore_ascii_case("true")
+                                        || s.eq_ignore_ascii_case("false") =>
+                                {
+                                    i += 1;
+                                    s.eq_ignore_ascii_case("true")
+                                }
+                                _ => true,
+                            }
+                        };
                         a.autostart_explicit = Some(v);
                     }
                     "notray" => a.notray = true,
@@ -307,13 +322,22 @@ async fn run() -> i32 {
         if let Some(dir) = exe.parent() {
             let _ = std::fs::remove_file(dir.join("panel.update.panel.exe"));
             let _ = std::fs::remove_file(dir.join("panel.update.wintun.dll"));
-            // 下载中断的残缺包删掉；已完整的包保留（下次 POST 直接复用，不重新下载）
-            let update_zip = dir.join("panel.update.zip");
-            #[cfg(windows)]
-            if update_zip.exists() && !crate::update::zip_has_eocd(&update_zip) {
-                let _ = std::fs::remove_file(&update_zip);
-            }
             let _ = std::fs::remove_file(dir.join("panel.update.tmp"));
+            // 更新包 zip 按版本命名（panel.update.<tag>.zip）：残缺包删掉；
+            // 完整包保留，下次更新同一版本时直接复用，不重新下载
+            #[cfg(windows)]
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("panel.update.") && name.ends_with(".zip") {
+                        let p = e.path();
+                        if !crate::update::zip_has_eocd(&p) {
+                            let _ = std::fs::remove_file(&p);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -655,6 +679,26 @@ async fn run() -> i32 {
             eprintln!("退出时撤销透明代理规则失败: {e}");
         }
     }
+    // Windows 系统代理同理：核心与面板都死了而 ProxyEnable=1 残留时，
+    // 全系统 HTTP(S) 上网失败，直到用户手动取消勾选。状态文件只有本面板
+    // 开启代理时才存在（读注册表 + 广播刷新是短阻塞，退出路径可接受）。
+    #[cfg(windows)]
+    {
+        let state_file = data_dir.join("sysproxy-state.json");
+        if state_file.exists() {
+            let port = st.settings().mixed_port.clamp(0, u16::MAX as i64) as u16;
+            let dd = data_dir.to_path_buf();
+            let r = tokio::task::spawn_blocking(move || {
+                crate::sysproxy::set_enabled(false, port, &dd)
+            })
+            .await;
+            match r {
+                Ok(Ok(())) => eprintln!("系统代理已随面板退出还原"),
+                Ok(Err(e)) => eprintln!("退出时还原系统代理失败: {e}"),
+                Err(e) => eprintln!("退出时还原系统代理失败: {e}"),
+            }
+        }
+    }
     eprintln!("bye");
     0
 }
@@ -717,16 +761,39 @@ async fn wait_for_exit(
                         handle.update(|s| s.core_running = sup.running());
                     }
                     Some(tray::TrayEvent::AutostartToggle) => {
-                        let on = !platform::autostart_enabled().unwrap_or(false);
-                        match platform::set_autostart(on, data_dir) {
-                            Ok(()) => eprintln!(
-                                "开机自启已{}（{}）",
-                                if on { "开启" } else { "关闭" },
-                                platform::autostart_note()
-                            ),
-                            Err(e) => eprintln!("切换开机自启失败: {e}"),
-                        }
-                        handle.update(|s| s.autostart = platform::autostart_enabled().unwrap_or(on));
+                        // UAC 提权路径会阻塞最长约 2 分钟：丢进 spawn_blocking，
+                        // 避免占死 tokio worker（否则 Ctrl+C / 托盘退出都无响应）
+                        let dir = data_dir.to_path_buf();
+                        let res = tokio::task::spawn_blocking(move || {
+                            let on = !platform::autostart_enabled().unwrap_or(false);
+                            let r = platform::set_autostart(on, &dir);
+                            (on, r)
+                        })
+                        .await;
+                        let on = match res {
+                            Ok((on, Ok(()))) => {
+                                eprintln!(
+                                    "开机自启已{}（{}）",
+                                    if on { "开启" } else { "关闭" },
+                                    platform::autostart_note()
+                                );
+                                on
+                            }
+                            Ok((_, Err(e))) => {
+                                eprintln!("切换开机自启失败: {e}");
+                                false
+                            }
+                            Err(e) => {
+                                eprintln!("切换开机自启失败: {e}");
+                                false
+                            }
+                        };
+                        let on_now = tokio::task::spawn_blocking(platform::autostart_enabled)
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                            .unwrap_or(on);
+                        handle.update(|s| s.autostart = on_now);
                     }
                 },
             }
@@ -748,13 +815,22 @@ async fn sync_tray_state(
         tick.tick().await;
         let core_running = sup.running();
         let listen = st.settings().listen;
-        let check_autostart = n % 10 == 0;
+        // 自启查询要起 schtasks 子进程（阻塞）：放 spawn_blocking，
+        // 不占 tokio worker；非检查轮次传 None 保持原值
+        let autostart = if n % 10 == 0 {
+            tokio::task::spawn_blocking(platform::autostart_enabled)
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+        } else {
+            None
+        };
         n = n.wrapping_add(1);
         handle.update(|s| {
             s.core_running = core_running;
             s.listen = listen.clone();
-            if check_autostart {
-                s.autostart = platform::autostart_enabled().unwrap_or(s.autostart);
+            if let Some(a) = autostart {
+                s.autostart = a;
             }
         });
     }

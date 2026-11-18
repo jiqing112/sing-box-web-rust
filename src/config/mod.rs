@@ -392,7 +392,10 @@ pub async fn check(bin: &str, eng: &str, data_dir: &Path, raw: &[u8]) -> CheckRe
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(engine::check_args(eng, &tmp, &home_dir))
         .env("GOMEMLIMIT", "64MiB")
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // 超时取消时（output future 被 drop）把内核一并杀掉：
+        // 卡死的 mihomo 会一直持有数据目录里的 geo/cache 文件
+        .kill_on_drop(true);
     let fut = cmd.output();
     let out = match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(o)) => o,

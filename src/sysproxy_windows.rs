@@ -249,11 +249,11 @@ fn query_dword(hk: HKEY, name: &str) -> Option<u32> {
     }
 }
 
-fn set_sz(hk: HKEY, name: &str, val: &str) {
+fn set_sz(hk: HKEY, name: &str, val: &str) -> Result<(), String> {
     unsafe {
         let n: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let v: Vec<u16> = val.encode_utf16().chain(Some(0)).collect();
-        RegSetValueExW(
+        let r = RegSetValueExW(
             hk,
             n.as_ptr(),
             0,
@@ -261,15 +261,23 @@ fn set_sz(hk: HKEY, name: &str, val: &str) {
             v.as_ptr() as *const u8,
             (v.len() * 2) as u32,
         );
+        if r != 0 {
+            return Err(format!("写入注册表 {name} 失败 (winerror {r})"));
+        }
     }
+    Ok(())
 }
 
-fn set_dword(hk: HKEY, name: &str, val: u32) {
+fn set_dword(hk: HKEY, name: &str, val: u32) -> Result<(), String> {
     unsafe {
         let n: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let v = val.to_ne_bytes();
-        RegSetValueExW(hk, n.as_ptr(), 0, REG_DWORD, v.as_ptr(), 4);
+        let r = RegSetValueExW(hk, n.as_ptr(), 0, REG_DWORD, v.as_ptr(), 4);
+        if r != 0 {
+            return Err(format!("写入注册表 {name} 失败 (winerror {r})"));
+        }
     }
+    Ok(())
 }
 
 // ------------------------------------------------------------ 开关逻辑
@@ -303,8 +311,9 @@ fn do_set(hk: HKEY, on: bool, mixed_port: u16, data_dir: &Path) -> Result<(), St
         .map_err(|e| format!("写入系统代理状态文件失败: {e}"));
 
         if r.is_ok() {
-            set_dword(key, "ProxyEnable", 1);
-            set_sz(key, "ProxyServer", &format!("127.0.0.1:{mixed_port}"));
+            let r1 = set_dword(key, "ProxyEnable", 1);
+            let r2 = set_sz(key, "ProxyServer", &format!("127.0.0.1:{mixed_port}"));
+            let mut r3 = Ok(());
             let cur = query_sz(key, "ProxyOverride").unwrap_or_default();
             if !cur.contains("<local>") {
                 let append = if cur.trim().is_empty() {
@@ -312,7 +321,13 @@ fn do_set(hk: HKEY, on: bool, mixed_port: u16, data_dir: &Path) -> Result<(), St
                 } else {
                     format!("{cur};localhost;127.0.0.1;<local>")
                 };
-                set_sz(key, "ProxyOverride", &append);
+                r3 = set_sz(key, "ProxyOverride", &append);
+            }
+            // 注册表写失败（策略保护等）必须报出来，不能假装成功
+            for res in [r1, r2, r3] {
+                if let Err(e) = res {
+                    return Err(e);
+                }
             }
         }
         r
@@ -321,16 +336,30 @@ fn do_set(hk: HKEY, on: bool, mixed_port: u16, data_dir: &Path) -> Result<(), St
         let path = state_path(data_dir);
         match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<SavedState>(&b).ok()) {
             Some(saved) => {
-                set_dword(key, "ProxyEnable", saved.enable);
-                set_sz(key, "ProxyServer", &saved.server);
-                set_sz(key, "ProxyOverride", &saved.override_list);
+                // 用户在面板代理期间手动改过 ProxyServer 时不回写快照，
+                // 只还原开关本身，避免覆盖用户的手工配置
+                let cur_server = query_sz(key, "ProxyServer").unwrap_or_default();
+                let panel_server = format!("127.0.0.1:{mixed_port}");
+                let mut errs: Vec<String> = Vec::new();
+                if let Err(e) = set_dword(key, "ProxyEnable", saved.enable) {
+                    errs.push(e);
+                }
+                if cur_server == panel_server || cur_server.is_empty() {
+                    if let Err(e) = set_sz(key, "ProxyServer", &saved.server) {
+                        errs.push(e);
+                    }
+                    if let Err(e) = set_sz(key, "ProxyOverride", &saved.override_list) {
+                        errs.push(e);
+                    }
+                }
                 let _ = std::fs::remove_file(&path);
-                Ok(())
+                if errs.is_empty() {
+                    Ok(())
+                } else {
+                    Err(errs.join("；"))
+                }
             }
-            None => {
-                set_dword(key, "ProxyEnable", 0);
-                Ok(())
-            }
+            None => set_dword(key, "ProxyEnable", 0),
         }
     };
     unsafe {

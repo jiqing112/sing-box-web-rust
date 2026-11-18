@@ -29,13 +29,23 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let res = fs::rename(&tmp, path);
     if res.is_err() {
         let _ = fs::remove_file(&tmp);
+        return res;
     }
-    res
+    // rename 本身也要落盘：否则断电后文件内容完整、目录项却丢了
+    #[cfg(unix)]
+    {
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }
 
 pub fn rand_bytes(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
-    let _ = getrandom::getrandom(&mut b);
+    // RNG 失败绝不能静默返回全零：会话 token、临时文件名都从这里来，
+    // 固定可猜的 token 比崩溃严重得多
+    getrandom::getrandom(&mut b).expect("系统随机数源不可用（getrandom 失败）");
     b
 }
 

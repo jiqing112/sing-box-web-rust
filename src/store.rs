@@ -14,6 +14,12 @@ use crate::util::{marshal_indent, now_rfc3339, unix_now, write_file_atomic};
 pub struct Store {
     dir: PathBuf,
     inner: RwLock<StoreInner>,
+    /// 节点文件是「读文件 → 改 → 写回」的 read-modify-write，必须串行化，
+    /// 否则开关节点与订阅刷新并发时会互相覆盖（丢失更新）。
+    node_mu: std::sync::Mutex<()>,
+    /// 快照版本号来自「先读索引再 +1」，两个并发快照会拿到同一版本并
+    /// 互相 GC 掉对方的文件，串行化解决。
+    snap_mu: std::sync::Mutex<()>,
 }
 
 struct StoreInner {
@@ -72,6 +78,8 @@ impl Store {
                 settings,
                 engine: String::new(),
             }),
+            node_mu: std::sync::Mutex::new(()),
+            snap_mu: std::sync::Mutex::new(()),
         };
         {
             let mut inner = s.inner.write().unwrap();
@@ -199,11 +207,19 @@ impl Store {
     pub fn save_settings(&self, v: Settings) -> std::io::Result<()> {
         let mut v = v;
         v.engine = engine::normalize(&v.engine);
-        let data = marshal_indent(&v)?;
+        let data;
         {
             let mut inner = self.inner.write().unwrap();
+            // config_version / last_check_* / engine 由各自入口在锁内维护
+            //（bump_config_version / set_last_check / set_engine，两者都先改
+            // inner 再走 save_settings）；调用方手里的克隆可能落后于磁盘，
+            // 整体覆盖会把并发修改回退。
+            v.config_version = inner.settings.config_version;
+            v.last_check_ok = inner.settings.last_check_ok;
+            v.last_check_at = inner.settings.last_check_at.clone();
+            v.engine = inner.engine.clone();
             inner.settings = v.clone();
-            inner.engine = v.engine.clone();
+            data = marshal_indent(&v)?;
         }
         write_file_atomic(&self.dir.join("settings.json"), &data)
     }
@@ -282,6 +298,35 @@ impl Store {
     }
 
     pub fn save_nodes(&self, sub_id: &str, nodes: &[Node]) -> std::io::Result<()> {
+        let _g = self.node_mu.lock().unwrap();
+        // 上锁后重查其它订阅已占用的 tag：并发刷新在拉取窗口里可能新增了
+        // 同名 tag，直接落盘会让 sing-box check 报 duplicate tag，卡死整个 apply。
+        let mut reserved: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for sub in self.subscriptions() {
+            if sub.id == sub_id {
+                continue;
+            }
+            if let Ok(list) = self.nodes(&sub.id) {
+                for n in list {
+                    reserved.insert(n.tag);
+                }
+            }
+        }
+        let mut nodes = nodes.to_vec();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for n in nodes.iter_mut() {
+            if n.tag.is_empty() {
+                continue;
+            }
+            let base = n.tag.clone();
+            let mut candidate = base.clone();
+            let mut k = 2;
+            while reserved.contains(&candidate) || !seen.insert(candidate.clone()) {
+                candidate = format!("{base}-{k}");
+                k += 1;
+            }
+            n.tag = candidate;
+        }
         let data = marshal_indent(&nodes)?;
         write_file_atomic(&self.nodes_path(sub_id), &data)
     }
@@ -296,7 +341,10 @@ impl Store {
         all
     }
 
-    pub fn set_node_enabled(&self, id: &str, enabled: bool) -> Result<(), crate::store::ErrNotFound> {
+    pub fn set_node_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        // 与 save_nodes 共用一把锁：开关节点时订阅刷新正在写回同一文件，
+        // 不加锁会丢失这次切换（或被刷新的旧快照覆盖回去）。
+        let _g = self.node_mu.lock().unwrap();
         for sub in self.subscriptions() {
             if let Ok(mut nodes) = self.nodes(&sub.id) {
                 let mut hit = false;
@@ -307,12 +355,13 @@ impl Store {
                     }
                 }
                 if hit {
-                    let _ = self.save_nodes(&sub.id, &nodes);
+                    let data = marshal_indent(&nodes).map_err(|e| e.to_string())?;
+                    write_file_atomic(&self.nodes_path(&sub.id), &data).map_err(|e| e.to_string())?;
                     return Ok(());
                 }
             }
         }
-        Err(ErrNotFound)
+        Err("节点不存在".into())
     }
 
     /* ------------------------------------------------------------ config */
@@ -361,6 +410,9 @@ impl Store {
 
     /// 把当前生效配置另存为一份快照，并按 keep 裁剪。
     pub fn take_snapshot(&self, note: &str) -> Result<Snapshot, String> {
+        // 串行化：版本号来自「读索引取最大 +1」，并发快照会拿到同一版本，
+        // 且 GC 会把对方刚写好、索引还没落的文件当孤立文件删掉。
+        let _g = self.snap_mu.lock().unwrap();
         let cur = self.config().map_err(|e| e.to_string())?;
         if cur.is_empty() {
             return Err("no config to snapshot".into());
@@ -450,11 +502,20 @@ fn snapshot_missing(keep: i64, version: i64) -> String {
     format!("快照 v{version} 不存在：只保留最近 {keep} 份，更早的已被自动回收")
 }
 
-pub struct ErrNotFound;
-
 fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
     match fs::read(path) {
-        Ok(b) => serde_json::from_slice::<T>(&b).unwrap_or_default(),
+        Ok(b) => match serde_json::from_slice::<T>(&b) {
+            Ok(v) => v,
+            Err(e) => {
+                // 静默回退会让「磁盘坏了」看起来像「数据被清空」，必须喊出来
+                eprintln!(
+                    "警告: {} 解析失败（{e}），已按空数据启动。文件内容如下（前 200 字节）:",
+                    path.display()
+                );
+                eprintln!("  {:?}", &b[..b.len().min(200)]);
+                T::default()
+            }
+        },
         Err(_) => T::default(),
     }
 }
