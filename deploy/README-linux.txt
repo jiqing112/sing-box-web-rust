@@ -77,6 +77,13 @@ mihomo 第一次启动会下载约 12 MB 的 geo 数据（geosite.dat / country.
 
 常见问题
 --------
+· 透明代理 / TUN / 接管 53 端口不可用（提示需要 root）
+  这三个功能依赖 root 权限。服务方式运行默认就是 root；如果你是手动
+  ./panel 启动的，请改用 sudo ./panel 或直接用 systemd 服务。面板检测到
+  非 root 时会在日志里给出明确提示。麒麟 / Debian 桌面版默认启用的
+  dnsmasq 占用 127.0.0.1:53 属正常现象：「透明代理」页可切换
+  「接管本机 53 端口」，或让面板自动回落 5335 避开。
+
 · 想改监听端口 / 口令
   改 /opt/sing-box-panel/bin/panel.conf 后 systemctl restart sing-box-panel。
   注意 unit 里写死了 -listen 0.0.0.0:9090，命令行参数优先于 panel.conf；
