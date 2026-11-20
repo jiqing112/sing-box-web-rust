@@ -1041,7 +1041,29 @@ impl Server {
         if let Err(e) = app.store.upsert_subscription(sub.clone()) {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
         }
-        json_ok(json!({"subscription": sub, "nodes": nodes.len()}))
+        // 导入成功即自动「渲染 → 应用 → 拉起核心」：开箱即跑，无需再点「启动核心」。
+        // 核心已在运行则不打扰（避免周期刷新反复重启核心），新节点在下次应用时生效。
+        let mut core_autostart = "skipped";
+        if !app.sup.running() && nodes.iter().any(|n| n.enabled) {
+            let set = app.store.settings();
+            match app.render_config(&set).await {
+                Ok(raw) => match app.applier.apply(&raw, "导入订阅自动启动").await {
+                    Ok(()) => {
+                        core_autostart = "started";
+                        eprintln!("导入订阅后已自动应用配置并拉起核心");
+                    }
+                    Err(e) => {
+                        core_autostart = "failed";
+                        eprintln!("导入订阅后自动启动核心失败: {e}");
+                    }
+                },
+                Err(e) => {
+                    core_autostart = "failed";
+                    eprintln!("导入订阅后自动渲染配置失败: {e}");
+                }
+            }
+        }
+        json_ok(json!({"subscription": sub, "nodes": nodes.len(), "core_autostart": core_autostart}))
     }
 
     async fn h_update_sub(
