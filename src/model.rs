@@ -95,6 +95,9 @@ pub struct Settings {
     pub tproxy_local: bool,
     #[serde(default)]
     pub tproxy_dns: bool,
+    /// 本机 53 端口策略：false=避开（被占回落 5335），true=接管（停用占用服务后核心绑 53）
+    #[serde(default)]
+    pub dns53_takeover: bool,
     #[serde(default)]
     pub tun_enabled: bool,
     /// rule = 国内直连其余走节点；global = 全部走节点；direct = 全部直连
@@ -147,6 +150,7 @@ impl Default for Settings {
             tproxy_enabled: false,
             tproxy_local: false,
             tproxy_dns: false,
+            dns53_takeover: false,
             tun_enabled: false,
             routing_mode: "".into(),
             lan_proxy: false,

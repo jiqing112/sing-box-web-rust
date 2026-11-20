@@ -434,6 +434,20 @@
                     </div>
                   </div>
 
+                  <!-- 本机 53 端口（DNS 入站）：避开 / 接管（仅 Linux） -->
+                  <div id="dns53Row">
+                    <div class="row">
+                      <div class="opt-main">
+                        <div class="row-tight"><b class="opt-title-strong">接管本机 53 端口</b></div>
+                      </div>
+                      <span class="badge amber" id="dns53Badge">—</span>
+                      <button class="switch" id="dns53Switch" role="switch" aria-checked="false"></button>
+                    </div>
+                    <div class="kv" id="dns53Grid" style="display:none">
+                      <span class="k">当前状态</span><span class="badge mono" id="dns53Status">—</span>
+                    </div>
+                  </div>
+
                   <div id="redirectDivider" class="hr"></div>
 
                   <!-- TUN：两个平台都有 -->

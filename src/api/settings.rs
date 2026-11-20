@@ -190,6 +190,7 @@ impl Server {
             cidrs = tproxy::detect_lan();
         }
         let st = tproxy::status(&app.tp, cidrs.clone()).await;
+        let dns53 = Self::dns53_info(&app).await;
         json_ok(json!({
             "enabled": st.enabled,
             "supported": tproxy::supported(),
@@ -202,7 +203,45 @@ impl Server {
             "cidrs": st.cidrs,
             "detected": tproxy::detect_lan(),
             "note": "redirect 仅接管 TCP；目标为内网的流量直接放行",
+            "dns53": dns53,
         }))
+    }
+
+    /// 本机 53 端口（核心 dns-in 入站）的现状，供「透明代理」页展示。
+    async fn dns53_info(app: &Arc<Server>) -> Value {
+        let set = app.store.settings();
+        let port = crate::dns53::configured_port(&app.store.config_path()).unwrap_or(0);
+        let desired = crate::dns53::DESIRED_PORT as u16;
+        // 只要 53 不可绑定就算占用（哪怕配置已回落 5335），
+        // 这样面板确认框始终能拿到占用者信息
+        let occupied =
+            crate::dns53::supported() && !crate::dns53::port_bindable("127.0.0.1", desired);
+        let occupiers: Vec<String> = if occupied {
+            crate::dns53::occupiers(desired)
+                .await
+                .iter()
+                .map(|(p, n)| format!("{n}(pid={p})"))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let effective = if port == 0 {
+            "none" // 配置里没有 dns-in 入站
+        } else if port == crate::dns53::DESIRED_PORT {
+            "takeover" // 核心绑定 53（空闲或已接管）
+        } else {
+            "fallback" // 已回落（如 5335）
+        };
+        json!({
+            "takeover": set.dns53_takeover,
+            "supported": crate::dns53::supported(),
+            "root": crate::dns53::have_root(),
+            "port": port,
+            "fallback_port": crate::dns53::FALLBACK_PORT,
+            "occupied": occupied,
+            "occupiers": occupiers,
+            "effective": effective,
+        })
     }
 
     /// 打开/关闭透明代理。打开时下发 nftables，关闭时删表。
@@ -219,6 +258,11 @@ impl Server {
             Err(resp) => return resp,
         };
         let enabled = inb.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        // 本机 53 端口策略（可与透明代理开关一起提交，也可单独提交）
+        let dns53_req = inb.get("dns53_takeover").and_then(|v| v.as_bool());
+        if dns53_req == Some(true) && !crate::dns53::have_root() {
+            return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::ROOT_HINT);
+        }
 
         let set = app.store.settings();
         let prev = set.clone();
@@ -245,6 +289,10 @@ impl Server {
             Some(v) => v.as_bool().unwrap_or(set.tproxy_dns),
             None => set.tproxy_dns,
         };
+        let dns53_takeover = match dns53_req {
+            Some(v) => v,
+            None => set.dns53_takeover,
+        };
 
         if enabled {
             if !tproxy::supported() {
@@ -253,6 +301,9 @@ impl Server {
                     "unsupported",
                     "透明代理依赖 nftables，仅支持 Linux",
                 );
+            }
+            if !crate::dns53::have_root() {
+                return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::ROOT_HINT);
             }
             if !app.sup.running() {
                 return err_json(
@@ -281,6 +332,7 @@ impl Server {
         set2.tproxy_enabled = enabled;
         set2.tproxy_local = local;
         set2.tproxy_dns = hijack_dns;
+        set2.dns53_takeover = dns53_takeover;
         set2.lan_cidrs = cidrs.clone();
         if let Err(e) = app.store.save_settings(set2.clone()) {
             // 规则已变更但设置没落盘时，把 nftables 恢复到改动前的状态
@@ -302,9 +354,45 @@ impl Server {
             warning = "透明代理入站只监听了回环地址，局域网设备会被拒绝连接；请把入站监听到 0.0.0.0 后重新应用配置".to_string();
             eprintln!("透明代理告警：{warning}");
         }
+        // 53 端口策略变更：立即释放端口（接管）并重渲染应用，让核心马上按新策略绑定
+        let mut dns53 = json!({});
+        if dns53_takeover != prev.dns53_takeover {
+            if dns53_takeover {
+                let (freed, note) =
+                    crate::dns53::try_free(crate::dns53::DESIRED_PORT as u16, &|s| {
+                        app.sup.logs.push(s.to_string());
+                        eprintln!("{s}");
+                    })
+                    .await;
+                dns53["freed"] = json!(freed);
+                dns53["note"] = json!(note);
+                if !freed {
+                    warning = format!("53 端口接管未完全成功：{note}；已按避开策略回落").into();
+                }
+            }
+            if app.sup.running() {
+                let set3 = app.store.settings();
+                match app.render_config(&set3).await {
+                    Ok(raw) => match app.applier.apply(&raw, "53 端口策略变更").await {
+                        Ok(()) => {
+                            dns53["applied"] = json!(true);
+                        }
+                        Err(e) => {
+                            dns53["applied"] = json!(false);
+                            dns53["apply_error"] = json!(e.to_string());
+                        }
+                    },
+                    Err(e) => {
+                        dns53["applied"] = json!(false);
+                        dns53["apply_error"] = json!(format!("渲染失败: {e}"));
+                    }
+                }
+            }
+        }
         json_ok(json!({
             "ok": true, "enabled": st.enabled, "local": st.local, "dns": st.dns,
             "rules": st.rules, "cidrs": cidrs, "warning": warning,
+            "dns53": dns53,
         }))
     }
 
@@ -580,6 +668,10 @@ impl Server {
                 "unsupported",
                 crate::platform::tun_unsupported_reason(),
             );
+        }
+        // Linux 开 TUN 需要 root（CAP_NET_ADMIN），否则核心拉起 TUN 网卡必失败
+        if enabled && cfg!(target_os = "linux") && !crate::dns53::have_root() {
+            return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::ROOT_HINT);
         }
         let set = app.store.settings();
         let prev = set.clone();

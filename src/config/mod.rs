@@ -31,6 +31,8 @@ pub struct RenderOpts {
     pub mixed_listen: String,
     pub tproxy_port: i64,
     pub clash_addr: String,
+    /// 本机 53 端口策略：false=被占时回落 5335，true=保留 53（由应用/启动链路接管端口）
+    pub dns53_takeover: bool,
 }
 
 pub const DEFAULT_CLASH_ADDR: &str = "127.0.0.1:9091";
@@ -51,6 +53,7 @@ impl RenderOpts {
             mixed_listen: set.mixed_listen.clone(),
             tproxy_port: set.tproxy_port,
             clash_addr: set.clash_addr.clone(),
+            dns53_takeover: set.dns53_takeover,
         }
     }
 
@@ -301,7 +304,57 @@ fn render_sing_box(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec<
         }
     }
 
+    // 本机 DNS 入站（dns-in）默认绑 127.0.0.1:53；本机 53 被占（dnsmasq /
+    // systemd-resolved 等很常见）时核心会启动即 FATAL 并进入崩溃循环。
+    // 避开模式（默认）：渲染时回落 5335（Go 版同款行为）；
+    // 接管模式：保留 53，端口释放由应用/启动链路负责（dns53::try_free）。
+    apply_dns_in_fallback(obj, opts.dns53_takeover);
+
     serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())
+}
+
+/// dns-in 入站若绑 53：探测本机端口，被占且未开接管则改用 5335。
+/// direct 入站同时监听 tcp/udp，任一被占即视为不可用。
+fn apply_dns_in_fallback(obj: &mut Map<String, Value>, dns53_takeover: bool) {
+    let Some(inbounds) = obj.get_mut("inbounds").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for inb in inbounds {
+        if inb.get("tag").and_then(|v| v.as_str()) != Some("dns-in") {
+            continue;
+        }
+        let port = inb.get("listen_port").and_then(|v| v.as_i64()).unwrap_or(0);
+        if port != crate::dns53::DESIRED_PORT {
+            continue;
+        }
+        let listen = inb
+            .get("listen")
+            .and_then(|v| v.as_str())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+        if !local_port_busy(&listen, crate::dns53::DESIRED_PORT as u16) {
+            continue;
+        }
+        if dns53_takeover {
+            eprintln!("本机 53 端口被占用：已开启接管，应用配置时将释放该端口后由核心绑定");
+            continue;
+        }
+        if let Some(p) = inb.get_mut("listen_port") {
+            *p = json!(crate::dns53::FALLBACK_PORT);
+        }
+        eprintln!(
+            "本机 DNS 端口 {} 已被占用，已自动改用 {}（如需恢复请释放该端口后重启面板；或在「透明代理」页开启接管）",
+            crate::dns53::DESIRED_PORT,
+            crate::dns53::FALLBACK_PORT
+        );
+    }
+}
+
+fn local_port_busy(listen: &str, port: u16) -> bool {
+    use std::net::{TcpListener, UdpSocket};
+    let busy_tcp = TcpListener::bind((listen, port)).is_err();
+    let busy_udp = UdpSocket::bind((listen, port)).is_err();
+    busy_tcp || busy_udp
 }
 
 /// 用面板设置覆盖模板里的分流规则（route 部分；dns 部分由调用方处理）。
@@ -562,15 +615,57 @@ impl Applier {
         if let Err(e) = self.store.write_config(raw) {
             return Err(ApplyError::Other(format!("write: {e}")));
         }
+        // 53 端口预检：接管模式先释放占用；释放不掉或避开模式回落 5335，
+        // 避免核心启动即 FATAL 进崩溃循环。
+        let conf = self.store.config_path();
+        let _ = crate::dns53::patch_stale_config(&conf, self.store.settings().dns53_takeover, &|s| {
+            self.sup.logs.push(s.to_string());
+            eprintln!("{s}");
+        })
+        .await;
         if let Err(e) = self.restart_core().await {
             return self.rollback(&prev, format!("restart: {e}")).await;
         }
         // 探活窗口必须盖过「失败→自动重启→成功」的全过程，否则会误判回滚。
         if let Err(e) = self.probe_loop(Duration::from_secs(25)).await {
+            // 53 端口可能在渲染后、启动前被占（如 dnsmasq 恰好拉起）：自愈一次再试
+            if self.core_crash_mentions_dns53() {
+                let healed = crate::dns53::patch_stale_config(
+                    &conf,
+                    self.store.settings().dns53_takeover,
+                    &|s| {
+                        self.sup.logs.push(s.to_string());
+                        eprintln!("{s}");
+                    },
+                )
+                .await;
+                self.sup.logs.push(
+                    "[panel] 检测到核心因 53 端口被占用启动失败，已自动处理后重试".into(),
+                );
+                let retried = match self.restart_core().await {
+                    Ok(()) => self.probe_loop(Duration::from_secs(25)).await.is_ok(),
+                    Err(_) => false,
+                };
+                if retried {
+                    let _ = healed;
+                    self.store.bump_config_version();
+                    return Ok(());
+                }
+            }
             return self.rollback(&prev, format!("probe: {e}")).await;
         }
         self.store.bump_config_version();
         Ok(())
+    }
+
+    /// 核心崩溃日志里是否带「绑 53 失败」特征。
+    fn core_crash_mentions_dns53(&self) -> bool {
+        self.sup
+            .logs_snapshot()
+            .iter()
+            .rev()
+            .take(40)
+            .any(|l| l.raw.contains(":53") && l.raw.contains("bind"))
     }
 
     /// 回滚到指定快照版本。

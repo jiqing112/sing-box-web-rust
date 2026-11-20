@@ -688,8 +688,14 @@ function openAddSub() {
     try {
       const d = await api('/api/v1/subscriptions', { method: 'POST', body: JSON.stringify({ name, url, auto, interval_hours: hours }) });
       closeDialog(true);
-      toast('ok', '订阅已添加', `解析出 ${d.nodes} 个节点`);
-      await Promise.all([loadSubs(), loadNodes()]);
+      if (d.core_autostart === 'started') {
+        toast('ok', '订阅已添加，核心已自动启动', `解析出 ${d.nodes} 个节点，配置已应用`);
+      } else if (d.core_autostart === 'failed') {
+        toast('info', '订阅已添加', `解析出 ${d.nodes} 个节点；自动启动核心失败，请到日志页查看`);
+      } else {
+        toast('ok', '订阅已添加', `解析出 ${d.nodes} 个节点`);
+      }
+      await Promise.all([loadSubs(), loadNodes(), loadTproxy()]);
       renderSubs(); renderNodes(); renderStatus();
     } catch (e) {
       toast('err', '添加失败', e.message);
@@ -1441,8 +1447,91 @@ async function loadTproxy() {
     $('#dnsSwitch').classList.toggle('on', !!d.dns);
     $('#localSwitch').disabled = !d.local_supported;
     $('#topStatus').dataset.tproxy = d.enabled ? '1' : '0';
+    renderDns53(d.dns53 || {});
   } catch (e) { /* ignore */ }
 }
+
+// 本机 53 端口（DNS 入站）状态条：避开回落 / 接管
+function renderDns53(x) {
+  const row = $('#dns53Row');
+  if (!row) return;
+  row.style.display = x.supported ? '' : 'none';
+  const sw = $('#dns53Switch');
+  sw.classList.toggle('on', !!x.takeover);
+  sw.setAttribute('aria-checked', !!x.takeover);
+  const badge = $('#dns53Badge');
+  const status = $('#dns53Status');
+  const occTxt = (x.occupiers && x.occupiers.length) ? x.occupiers.join('、') : '';
+  if (x.takeover) {
+    badge.textContent = occTxt ? '接管待生效' : '接管模式';
+    badge.className = 'badge ' + (occTxt ? 'amber' : 'lime');
+    status.textContent = occTxt
+      ? `占用中：${occTxt}；启动核心时将自动释放`
+      : x.port === 53 ? '核心绑定 53（本机 DNS 入站）' : '将绑定 53';
+  } else if (x.occupied) {
+    badge.textContent = '已被占用';
+    badge.className = 'badge amber';
+    status.textContent = `${occTxt} 占用 53；自动回落 ${x.fallback_port} 避免启动失败`;
+  } else if (x.port === 53) {
+    badge.textContent = '核心占用 53';
+    badge.className = 'badge lime';
+    status.textContent = '53 端口空闲，核心绑定 53（本机 DNS 入站）';
+  } else if (x.port && x.port !== 53) {
+    badge.textContent = `回落 ${x.port}`;
+    badge.className = 'badge';
+    status.textContent = `53 被占用过，dns-in 使用 ${x.port}`;
+  } else {
+    badge.textContent = '未配置';
+    badge.className = 'badge';
+    status.textContent = '当前配置没有 dns-in 入站';
+  }
+  $('#dns53Grid').style.display = '';
+}
+
+$('#dns53Switch').onclick = async () => {
+  const cur = state.tproxy?.dns53 || {};
+  const next = !cur.takeover;
+  if (next && !cur.root) {
+    toast('err', '需要 root 权限', '请用 systemd 服务（root）运行面板后再开启接管');
+    return;
+  }
+  if (next) {
+    const occTxt = (cur.occupiers && cur.occupiers.length) ? `当前占用者：<code>${esc(cur.occupiers.join('、'))}</code><br>` : '';
+    const ok = await confirmDialog({
+      title: '接管本机 53 端口？',
+      body: occTxt + '将停止并禁用占用 53 的服务（如 dnsmasq），由核心直接绑定 53 作为本机 DNS 入站。<br>systemd-resolved（127.0.0.53）不受影响。核心运行中会自动重启应用。',
+      confirm: '开始接管'
+    });
+    if (!ok) return;
+  } else {
+    const ok = await confirmDialog({
+      title: '取消接管本机 53 端口？',
+      body: '若 53 端口此后被其它程序占用，核心将自动回落 <code>' + (cur.fallback_port || 5335) + '</code> 避开。',
+      confirm: '取消接管'
+    });
+    if (!ok) return;
+  }
+  const sw = $('#dns53Switch');
+  sw.disabled = true;
+  try {
+    const d = await api('/api/v1/tproxy', { method: 'PUT', body: JSON.stringify({ dns53_takeover: next }) });
+    const r = d.dns53 || {};
+    if (next && r.applied) {
+      toast('ok', '已接管本机 53 端口', r.note || '核心已重启并绑定 53');
+    } else if (next) {
+      toast('ok', '已开启接管', r.note || '下次启动核心时生效');
+    } else {
+      toast('info', '已取消接管', '53 端口被占用时将自动回落避开');
+    }
+    if (r.apply_error) toast('err', '应用配置失败', r.apply_error);
+    if (d.warning) toast('info', '注意', d.warning);
+  } catch (e) {
+    toast('err', '操作失败', e.message);
+  } finally {
+    sw.disabled = false;
+    await loadTproxy();
+  }
+};
 
 $('#tproxyRefresh').onclick = loadTproxy;
 

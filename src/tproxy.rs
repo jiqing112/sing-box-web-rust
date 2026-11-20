@@ -224,8 +224,14 @@ pub async fn status(m: &Manager, cidrs: Vec<String>) -> Status {
 /// 下发前做最低限度检查，避免把整机网络搞坏。
 pub async fn preflight(m: &Manager, port: i64) -> Result<(), String> {
     guard(m)?;
+    if !crate::dns53::have_root() {
+        return Err(format!("透明代理需要 root 权限：{}", crate::dns53::ROOT_HINT));
+    }
     if !m.nft.exists() {
-        return Err("找不到 nft 命令".into());
+        return Err(format!(
+            "找不到 nft 命令（{}）。请安装 nftables：Debian/麒麟 `sudo apt install nftables`；RHEL/欧拉系 `sudo dnf install nftables`；Alpine `apk add nftables`",
+            m.nft.display()
+        ));
     }
     if !supports_redirect(m).await {
         return Err("内核缺少 NAT redirect 支持".into());

@@ -5,6 +5,7 @@
 mod api;
 mod clashclient;
 mod config;
+mod dns53;
 mod engine;
 mod geodata;
 mod listen;
@@ -526,6 +527,15 @@ async fn run() -> i32 {
         eprintln!("清理残留内核失败: {e}");
     }
 
+    // 非 root 运行时的能力提醒：透明代理 / TUN / 53 接管都依赖 root
+    #[cfg(target_os = "linux")]
+    if !dns53::have_root() {
+        eprintln!(
+            "警告: 面板未以 root 运行——透明代理、TUN 虚拟网卡、接管本机 53 端口将不可用；{}",
+            dns53::ROOT_HINT
+        );
+    }
+
     // 自动启动核心：先探活再决定，避免端口冲突导致启动失败。
     if args.autostart_explicit.unwrap_or(true) {
         let has_config = st.config().map(|c| !c.is_empty()).unwrap_or(false);
@@ -550,6 +560,14 @@ async fn run() -> i32 {
                         );
                     }
                     _ => {
+                        // 防陈旧配置：上次渲染时 53 端口还空闲、现在被占（如 dnsmasq
+                        // 开机自启），核心会启动即 FATAL。按设置释放端口或回落 5335。
+                        dns53::patch_stale_config(
+                            &st.config_path(),
+                            settings.dns53_takeover,
+                            &|s| eprintln!("{s}"),
+                        )
+                        .await;
                         if let Err(e) = sup.start() {
                             eprintln!("autostart {}: {e}", engine::label(&eng));
                         }
