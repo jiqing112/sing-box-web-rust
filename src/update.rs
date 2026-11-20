@@ -344,9 +344,10 @@ fn sha256_hex_file(path: &Path) -> Result<String, String> {
 
 // ------------------------------------------------------------ 平台无关的流式抽取骨架
 
+#[cfg_attr(not(windows), allow(unused_variables))]
 async fn stage_from_release(
     http: &reqwest::Client,
-    _tag: &str,
+    tag: &str,
     url: &str,
     asset: &str,
     data_dir: &Path,
