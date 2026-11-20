@@ -7,7 +7,7 @@ mod imp;
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{TrayEvent, TrayState};
+    use super::TrayState;
 
     #[derive(Clone)]
     pub struct TrayHandle;

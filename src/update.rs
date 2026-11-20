@@ -346,7 +346,7 @@ fn sha256_hex_file(path: &Path) -> Result<String, String> {
 
 async fn stage_from_release(
     http: &reqwest::Client,
-    tag: &str,
+    _tag: &str,
     url: &str,
     asset: &str,
     data_dir: &Path,
@@ -571,6 +571,7 @@ async fn stage_platform_windows(
 
 /// zip 完整性粗检：尾部 64KB 内有 EOCD 签名（PK）。
 /// 残缺包没有 EOCD，防止拿半截文件去解压误导用户。
+#[cfg(windows)]
 pub fn zip_has_eocd(path: &Path) -> bool {
     let Ok(data) = std::fs::read(path) else {
         return false;
@@ -718,6 +719,8 @@ async fn stage_platform_unix(
     let staged = exe_dir.join("panel.update.tmp");
 
     // 抽取是同步阻塞 IO，放阻塞线程，不占 tokio worker
+    // 期望哈希克隆成 owned 再进 'static 闭包（借用引用无法逃逸进 spawn_blocking）
+    let expect_sha = expect_sha.clone();
     tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
         let mut hasher = sha2::Sha256::new();
         // 哈希的是压缩字节：Tee 包住 ChanReader 再喂 gzip（与 .sha256 对整包
@@ -763,7 +766,7 @@ async fn stage_platform_unix(
         let got = format!("{:x}", hasher.finalize());
         match expect_sha {
             Some(expect) => {
-                if got != *expect {
+                if got != expect {
                     let _ = std::fs::remove_file(&staged);
                     return Err("更新包校验失败（sha256 不符），已丢弃。请重试或手动更新".into());
                 }

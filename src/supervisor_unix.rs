@@ -4,7 +4,6 @@ use std::path::Path;
 use tokio::process::Command;
 
 pub fn setup_process_group(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
     unsafe {
         cmd.pre_exec(|| {
             if libc::setpgid(0, 0) != 0 {
