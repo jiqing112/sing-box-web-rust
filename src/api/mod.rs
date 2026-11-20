@@ -826,6 +826,17 @@ impl Server {
         let res: Result<(), String> = match action.as_str() {
             "start" => {
                 app.sup.reset_crashes();
+                // 53 端口预检：陈旧配置里 dns-in 仍绑 53 且被占时，
+                // 启动前按策略释放端口或回落，避免核心启动即 FATAL
+                crate::dns53::patch_stale_config(
+                    &app.store.config_path(),
+                    set.dns53_takeover,
+                    &|s| {
+                        app.sup.logs.push(s.to_string());
+                        eprintln!("{s}");
+                    },
+                )
+                .await;
                 let r = match app.first_run_start().await {
                     Some(r) => r,
                     None => match app.sup.start() {

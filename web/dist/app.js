@@ -1429,7 +1429,15 @@ $('#copyLogBtn').onclick = () => {
   toast('ok', '已复制', `${state.logs.length} 行日志`);
 };
 async function loadTproxy() {
-  if (!isLinux()) return;
+  if (!isLinux()) {
+    // Windows：redirect/透明代理不适用，但「接管本机 53 端口」跨平台
+    try {
+      const d = await api('/api/v1/tproxy');
+      state.tproxy = d;
+      renderDns53(d.dns53 || {});
+    } catch (e) { /* ignore */ }
+    return;
+  }
   try {
     const d = await api('/api/v1/tproxy');
     state.tproxy = d;
@@ -1491,22 +1499,30 @@ function renderDns53(x) {
 $('#dns53Switch').onclick = async () => {
   const cur = state.tproxy?.dns53 || {};
   const next = !cur.takeover;
+  const who = isLinux() ? 'root' : '管理员';
   if (next && !cur.root) {
-    toast('err', '需要 root 权限', '请用 systemd 服务（root）运行面板后再开启接管');
+    toast('err', `需要${who}权限`, isLinux()
+      ? '请用 systemd 服务（root）运行面板后再开启接管'
+      : '请以管理员身份重新运行面板后再开启接管');
     return;
   }
   if (next) {
     const occTxt = (cur.occupiers && cur.occupiers.length) ? `当前占用者：<code>${esc(cur.occupiers.join('、'))}</code><br>` : '';
+    const note = isLinux()
+      ? '将停止并禁用占用 53 的服务（如 dnsmasq），由核心直接绑定 53 作为本机 DNS 入站。<br>systemd-resolved（127.0.0.53）不受影响。核心运行中会自动重启应用。'
+      : '将为配置注入本机 DNS 入站（127.0.0.1:53），并强制结束占用 53 的程序（如 ICS 共享、AdGuard）。<br>核心运行中会自动重启应用。';
     const ok = await confirmDialog({
       title: '接管本机 53 端口？',
-      body: occTxt + '将停止并禁用占用 53 的服务（如 dnsmasq），由核心直接绑定 53 作为本机 DNS 入站。<br>systemd-resolved（127.0.0.53）不受影响。核心运行中会自动重启应用。',
+      body: occTxt + note,
       confirm: '开始接管'
     });
     if (!ok) return;
   } else {
     const ok = await confirmDialog({
       title: '取消接管本机 53 端口？',
-      body: '若 53 端口此后被其它程序占用，核心将自动回落 <code>' + (cur.fallback_port || 5335) + '</code> 避开。',
+      body: isLinux()
+        ? '若 53 端口此后被其它程序占用，核心将自动回落 <code>' + (cur.fallback_port || 5335) + '</code> 避开。'
+        : '配置中的本机 DNS 入站将被移除（恢复默认，TUN 模式自动劫持 DNS）。',
       confirm: '取消接管'
     });
     if (!ok) return;

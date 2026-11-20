@@ -527,12 +527,11 @@ async fn run() -> i32 {
         eprintln!("清理残留内核失败: {e}");
     }
 
-    // 非 root 运行时的能力提醒：透明代理 / TUN / 53 接管都依赖 root
-    #[cfg(target_os = "linux")]
+    // 非 root/管理员运行时的能力提醒：透明代理 / TUN / 53 接管都依赖特权
     if !dns53::have_root() {
         eprintln!(
-            "警告: 面板未以 root 运行——透明代理、TUN 虚拟网卡、接管本机 53 端口将不可用；{}",
-            dns53::ROOT_HINT
+            "警告: 面板未以特权身份运行——透明代理、TUN 虚拟网卡、接管本机 53 端口将不可用；{}",
+            dns53::root_hint()
         );
     }
 

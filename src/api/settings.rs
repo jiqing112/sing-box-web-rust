@@ -212,19 +212,22 @@ impl Server {
         let set = app.store.settings();
         let port = crate::dns53::configured_port(&app.store.config_path()).unwrap_or(0);
         let desired = crate::dns53::DESIRED_PORT as u16;
-        // 只要 53 不可绑定就算占用（哪怕配置已回落 5335），
-        // 这样面板确认框始终能拿到占用者信息
-        let occupied =
-            crate::dns53::supported() && !crate::dns53::port_bindable("127.0.0.1", desired);
-        let occupiers: Vec<String> = if occupied {
-            crate::dns53::occupiers(desired)
-                .await
-                .iter()
-                .map(|(p, n)| format!("{n}(pid={p})"))
-                .collect()
+        // 只要 53 不可绑定就算占用（哪怕配置已回落 5335）；
+        // 核心自己绑着 53 是期望状态，不算占用
+        let (core_running, core_pid, _, _) = app.sup.status();
+        let raw_occ = if crate::dns53::supported()
+            && !crate::dns53::port_bindable("127.0.0.1", desired)
+        {
+            crate::dns53::occupiers(desired).await
         } else {
             Vec::new()
         };
+        let occupiers: Vec<String> = raw_occ
+            .iter()
+            .filter(|(p, _)| !(core_running && *p == core_pid as i32))
+            .map(|(p, n)| format!("{n}(pid={p})"))
+            .collect();
+        let occupied = !occupiers.is_empty();
         let effective = if port == 0 {
             "none" // 配置里没有 dns-in 入站
         } else if port == crate::dns53::DESIRED_PORT {
@@ -261,7 +264,7 @@ impl Server {
         // 本机 53 端口策略（可与透明代理开关一起提交，也可单独提交）
         let dns53_req = inb.get("dns53_takeover").and_then(|v| v.as_bool());
         if dns53_req == Some(true) && !crate::dns53::have_root() {
-            return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::ROOT_HINT);
+            return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::root_hint());
         }
 
         let set = app.store.settings();
@@ -303,7 +306,7 @@ impl Server {
                 );
             }
             if !crate::dns53::have_root() {
-                return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::ROOT_HINT);
+                return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::root_hint());
             }
             if !app.sup.running() {
                 return err_json(
@@ -671,7 +674,7 @@ impl Server {
         }
         // Linux 开 TUN 需要 root（CAP_NET_ADMIN），否则核心拉起 TUN 网卡必失败
         if enabled && cfg!(target_os = "linux") && !crate::dns53::have_root() {
-            return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::ROOT_HINT);
+            return err_json(StatusCode::FORBIDDEN, "root_required", crate::dns53::root_hint());
         }
         let set = app.store.settings();
         let prev = set.clone();

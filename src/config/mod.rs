@@ -305,12 +305,39 @@ fn render_sing_box(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec<
     }
 
     // 本机 DNS 入站（dns-in）默认绑 127.0.0.1:53；本机 53 被占（dnsmasq /
-    // systemd-resolved 等很常见）时核心会启动即 FATAL 并进入崩溃循环。
-    // 避开模式（默认）：渲染时回落 5335（Go 版同款行为）；
-    // 接管模式：保留 53，端口释放由应用/启动链路负责（dns53::try_free）。
+    // systemd-resolved / Windows ICS 等很常见）时核心会启动即 FATAL 并进入崩溃循环。
+    // 接管模式：确保配置里有 dns-in 入站（Windows 默认模板没有，注入一个），
+    // 端口释放由应用/启动链路负责（dns53::try_free）；
+    // 避开模式（默认）：渲染时回落 5335（Go 版同款行为）。
+    if opts.dns53_takeover {
+        ensure_dns_in_inbound(obj);
+    }
     apply_dns_in_fallback(obj, opts.dns53_takeover);
 
     serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())
+}
+
+/// 接管模式下确保存在 dns-in 入站（127.0.0.1:53）。
+/// Windows 默认模板不带 dns-in；Linux 模板自带（本函数空跑）。
+/// mihomo 的 DNS 走 dns.listen（clash 渲染），不走此函数。
+fn ensure_dns_in_inbound(obj: &mut Map<String, Value>) {
+    let inbounds = obj.entry("inbounds".to_string()).or_insert_with(|| json!([]));
+    if !inbounds.is_array() {
+        *inbounds = json!([]);
+    }
+    let arr = inbounds.as_array_mut().unwrap();
+    let exists = arr
+        .iter()
+        .any(|i| i.get("tag").and_then(|v| v.as_str()) == Some("dns-in"));
+    if exists {
+        return;
+    }
+    arr.push(json!({
+        "type": "direct",
+        "tag": "dns-in",
+        "listen": "127.0.0.1",
+        "listen_port": crate::dns53::DESIRED_PORT
+    }));
 }
 
 /// dns-in 入站若绑 53：探测本机端口，被占且未开接管则改用 5335。
