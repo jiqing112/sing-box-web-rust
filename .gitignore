@@ -7,6 +7,13 @@
 panel-data/
 go-migrate-data/
 
+# 本机部署产物（panel.exe 由 target/release 拷贝而来，内核 exe 随面板放置）
+/panel.exe
+/sing-box.exe
+/mihomo.exe
+/wintun.dll
+/panel.conf
+
 # mipsel 离线构建产物（不入库）
 /vendor/
 /.cargo/

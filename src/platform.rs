@@ -332,27 +332,42 @@ mod autostart {
     use std::os::windows::process::CommandExt;
 
     pub fn enabled() -> Result<bool, String> {
-        let out = run(&[s("/Query"), s("/TN"), s(TASK)])?;
-        // 用退出码判断：中文系统输出的是「成功」而不是 SUCCESS，且任务不存在时退出码非 0。
-        Ok(out.status.success())
+        let out = run(&[s("/Query"), s("/TN"), s(TASK), s("/V"), s("/FO"), s("CSV")])?;
+        if !out.status.success() {
+            // 任务不存在（或无权查询）：按未开启处理
+            return Ok(false);
+        }
+        // 任务存在 ≠ 指向本程序：挪过目录、或由其他位置的版本注册时，
+        // 开机拉起的是注册路径上的那份 exe。按「未开启」呈现——用户重新
+        // 打开开关即会删旧建新，把指向修正到当前 exe（本次排查的实际教训）。
+        let text = String::from_utf8_lossy(&out.stdout);
+        let self_exe = plain_path(&std::env::current_exe().map_err(|e| e.to_string())?);
+        Ok(task_matches_self(&text, &self_exe))
     }
 
-    /// `/Create` 的完整参数表。/TR 的整段命令**作为一个参数**传下去，
-    /// 内部引号由 schtasks 自己解析；安装路径带空格也不会被拆散。
-    fn create_args(exe: &std::path::Path, data_dir: &std::path::Path) -> Vec<String> {
-        let tr = format!("\"{}\" -data \"{}\"", exe.display(), data_dir.display());
+    /// canonicalize 给出 \\?\C:\... verbatim 路径；任务存储/显示与路径比较
+    /// 统一用 plain 形式，否则注册的 TR 带 \\?\ 而查询比较对不上。
+    fn plain_path(p: &std::path::Path) -> String {
+        let s = p.to_string_lossy();
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    }
+
+    /// CSV 输出里匹配自身 exe 路径。GBK 字节经 from_utf8_lossy 变成替换符
+    /// 只影响中文路径的精确匹配（安全方向：显示为关，重开开关即修正）。
+    fn task_matches_self(csv: &str, self_exe: &str) -> bool {
+        csv.to_lowercase().contains(&self_exe.to_lowercase())
+    }
+
+    /// `/Create /XML` 的完整参数表：任务形状（SYSTEM + BootTrigger +
+    /// 失败 1 分钟重启 3 次 + StartWhenAvailable）全部由 XML 表达，
+    /// 管理员直跑与 UAC 提权两条路共用同一份 XML。
+    fn create_xml_args(xml_path: &std::path::Path) -> Vec<String> {
         vec![
             s("/Create"),
             s("/TN"),
             s(TASK),
-            s("/TR"),
-            tr,
-            s("/SC"),
-            s("ONSTART"),
-            s("/RU"),
-            s("SYSTEM"),
-            s("/RL"),
-            s("HIGHEST"),
+            s("/XML"),
+            plain_path(xml_path),
             s("/F"),
         ]
     }
@@ -378,38 +393,35 @@ mod autostart {
     pub fn set(on: bool, data_dir: &std::path::Path) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe = exe.canonicalize().unwrap_or(exe);
-        // 1) 直跑。ON 时先删再建，保证任务参数指向当前 exe/data。
-        let direct: Result<(), String> = if !on {
+        if !on {
             let out = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")])?;
             if out.status.success() {
-                Ok(())
-            } else {
-                let msg = out_msg(&out);
-                // 任务本就不存在 = 目标已达成（中英文系统文案都含这两类字样）
-                if msg.contains("找不到") || msg.to_lowercase().contains("cannot find") {
-                    Ok(())
-                } else {
-                    Err(msg)
-                }
+                return Ok(());
             }
-        } else {
-            let _ = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")]);
-            let out = run(&create_args(&exe, data_dir))?;
-            if out.status.success() {
-                Ok(())
-            } else {
-                Err(out_msg(&out))
+            let msg = out_msg(&out);
+            // 任务本就不存在 = 目标已达成（中英文系统文案都含这两类字样）
+            if msg.contains("找不到") || msg.to_lowercase().contains("cannot find") {
+                return Ok(());
             }
-        };
-        if direct.is_ok() {
+            eprintln!(
+                "面板开机自启: 直接删除失败（{msg}），尝试 UAC 提权——请在弹出的授权窗口中点「是」"
+            );
+            return elevate_set(false, None);
+        }
+        // ON：XML 只生成一次，直跑（管理员）与 UAC 提权共用同一任务形状。
+        // 先删旧再建，保证任务指向当前 exe/data（顺带修正指向别的位置的旧任务）。
+        let xml_path = write_task_xml(&exe, data_dir)?;
+        let _ = run(&[s("/Delete"), s("/TN"), s(TASK), s("/F")]);
+        let out = run(&create_xml_args(&xml_path))?;
+        if out.status.success() {
+            let _ = std::fs::remove_file(&xml_path);
             return Ok(());
         }
-        // 2) 权限不足 → UAC 提权闭环。
+        let msg = out_msg(&out);
         eprintln!(
-            "面板开机自启: 直接执行失败（{}），尝试 UAC 提权——请在弹出的授权窗口中点「是」",
-            direct.unwrap_err()
+            "面板开机自启: 直接创建失败（{msg}），尝试 UAC 提权——请在弹出的授权窗口中点「是」"
         );
-        elevate_set(on, &exe, data_dir)
+        elevate_set(true, Some(&xml_path))
     }
 
     /// 生成计划任务 XML（对齐 Go 版任务形状：BootTrigger + SYSTEM +
@@ -421,7 +433,7 @@ mod autostart {
                 .replace('>', "&gt;")
                 .replace('"', "&quot;")
         };
-        let args = format!("-data \"{}\"", esc(&data_dir.to_string_lossy()));
+        let args = format!("-data \"{}\"", esc(&plain_path(data_dir)));
         format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -440,7 +452,7 @@ mod autostart {
   </Settings>
   <Actions Context="Author"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions>
 </Task>"#,
-            esc(&exe.to_string_lossy()),
+            esc(&plain_path(exe)),
             args
         )
     }
@@ -476,25 +488,27 @@ mod autostart {
         }
     }
 
-    /// UAC 提权执行：弹窗（本地交互桌面）→ 等待 → 读结果文件闭环。
-    /// 用户点「否」或 UAC 约 2 分钟超时：Start-Process 抛错、外层退出非零、
-    /// 结果文件缺失，统一归为授权失败。
-    fn elevate_set(on: bool, exe: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
+    /// 生成任务 XML 并写盘（UTF-16LE BOM，中文路径无忧）。直跑与提权共用同一份。
+    fn write_task_xml(exe: &std::path::Path, data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
         let dir = std::env::temp_dir();
         let xml_path = dir.join(format!("sb-panel-task-{}.xml", crate::util::rand_hex(6)));
+        std::fs::write(&xml_path, utf16le_bytes(&build_task_xml(exe, data_dir)))
+            .map_err(|e| format!("写入计划任务 XML 失败: {e}"))?;
+        Ok(xml_path)
+    }
+
+    /// UAC 提权执行：弹窗（本地交互桌面）→ 等待 → 读结果文件闭环。
+    /// 用户点「否」或 UAC 约 2 分钟超时：Start-Process 抛错、外层退出非零、
+    /// 结果文件缺失，统一归为授权失败。xml_path 由调用方写好（ON 时必传），
+    /// 提权进程内部 /Query 验证后闭环，结束时清理结果文件与 XML。
+    fn elevate_set(on: bool, xml_path: Option<&std::path::Path>) -> Result<(), String> {
+        let dir = std::env::temp_dir();
         let result = dir.join(format!("sb-panel-task-{}.txt", crate::util::rand_hex(6)));
         let _ = std::fs::remove_file(&result);
 
-        let write_result = if on {
-            std::fs::write(&xml_path, utf16le_bytes(&build_task_xml(exe, data_dir)))
-        } else {
-            Ok(()) // OFF 无需 XML
-        };
-        if let Err(e) = write_result {
-            return Err(format!("写入计划任务 XML 失败: {e}"));
-        }
-
-        let ps = build_elevated_ps(on, &xml_path, &result);
+        // OFF 分支不引用 xml，占位路径仅满足签名
+        let dummy = std::path::PathBuf::new();
+        let ps = build_elevated_ps(on, xml_path.unwrap_or(&dummy), &result);
         let encoded = utf16le_b64(&ps);
         let out = Command::new("powershell")
             .args([
@@ -509,7 +523,9 @@ mod autostart {
 
         let result_state = std::fs::read_to_string(&result).unwrap_or_default();
         let _ = std::fs::remove_file(&result);
-        let _ = std::fs::remove_file(&xml_path);
+        if let Some(x) = xml_path {
+            let _ = std::fs::remove_file(x);
+        }
 
         if result_state.trim() == "OK" {
             eprintln!("面板开机自启: UAC 提权执行成功");
@@ -544,21 +560,56 @@ mod autostart {
     mod tests {
         use super::*;
 
-        /// 回归：以前是「拼成一整串再 split_whitespace」，路径带空格时 /TR 会被拆成多个参数。
+        /// 回归：以前直跑用 /SC ONSTART 裸参数、提权用 /XML，两条路的任务形状
+        /// 不一致（直跑版本没有失败自动重启）。现在统一 /Create /XML。
         #[test]
-        fn create_args_keeps_path_with_spaces_whole() {
-            let args = create_args(
-                std::path::Path::new(r"C:\Program Files\panel\panel.exe"),
-                std::path::Path::new(r"C:\Program Files\panel\data"),
-            );
-            let i = args.iter().position(|a| a == "/TR").expect("/TR");
+        fn create_xml_args_shape() {
+            let args = create_xml_args(std::path::Path::new(r"C:\Temp\task.xml"));
             assert_eq!(
-                args[i + 1],
-                r#""C:\Program Files\panel\panel.exe" -data "C:\Program Files\panel\data""#
+                args,
+                vec![
+                    "/Create",
+                    "/TN",
+                    "sing-box-panel",
+                    "/XML",
+                    r"C:\Temp\task.xml",
+                    "/F",
+                ]
             );
-            assert_eq!(args.len(), 12);
-            assert_eq!(args[0], "/Create");
-            assert_eq!(args.last().unwrap(), "/F");
+        }
+
+        /// verbatim 前缀必须剥掉：canonicalize 给 \\?\C:\...，任务存储/显示
+        /// 与路径比较都用 plain 形式。
+        #[test]
+        fn plain_path_strips_verbatim() {
+            assert_eq!(
+                plain_path(std::path::Path::new(r"\\?\C:\Users\a\panel.exe")),
+                r"C:\Users\a\panel.exe"
+            );
+            assert_eq!(
+                plain_path(std::path::Path::new(r"C:\Users\a\panel.exe")),
+                r"C:\Users\a\panel.exe"
+            );
+        }
+
+        /// enabled() 的核心判断：任务指向本程序才算「已开启」。
+        /// 指向别的位置（挪目录/旧版本注册的）必须按未开启呈现，重开开关即修正。
+        #[test]
+        fn task_matches_self_in_csv() {
+            let row = concat!(
+                r#""\sing-box-panel","DESKTOP","Running","","","","","","",0,""#,
+                r#""C:\app\panel.exe" -data "C:\app\panel-data","SYSTEM","Enabled""#
+            );
+            assert!(task_matches_self(
+                row,
+                r"C:\app\panel.exe"
+            ));
+            // 指向别的 exe：不匹配
+            assert!(!task_matches_self(row, r"C:\old\panel-windows-amd64.exe"));
+            // 前缀相同也不许误匹配（panel2.exe 不含 panel.exe）
+            assert!(!task_matches_self(row, r"C:\app\panel2.exe"));
+            // Windows 路径大小写不敏感
+            assert!(task_matches_self(row, r"c:\APP\panel.exe"));
         }
 
         /// 提权 XML：SYSTEM SID、命令与参数就位、XML 特殊字符已转义。
