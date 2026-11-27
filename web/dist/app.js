@@ -1019,56 +1019,56 @@ async function openSpeedCfg() {
   let s;
   try { s = await api('/api/v1/settings/speedtest'); }
   catch (e) { toast('err', '读取测速设置失败', e.message); return; }
+  const MODE_HINT = {
+    interval: '按设定间隔测试全部启用节点，自动切换至延迟最低者。',
+    failover: '仅探测当前节点，连续失败后全量重测并切换。',
+    speed: '优先使用带宽测速结果最高的节点。'
+  };
+  const MODE_TIP = {
+    interval: '新节点需比当前快出容差以上才会切换，防止抖动',
+    failover: '每 30 秒探测一次当前节点，连续 2 次失败触发全量重测',
+    speed: '候选高出当前带宽 25% 才切换；无带宽数据时回落延迟选优'
+  };
   $('#dialog').innerHTML = `
     <div class="dialog-hd"><h3>测速设置</h3></div>
     <div class="dialog-bd">
-      <div class="field"><label>自动选优方式</label>
+      <div class="field">
+        <label>自动选优</label>
         <div class="seg-opts wz-fill" id="cfgMode">
-          <button type="button" data-mode="interval" class="${s.auto_select_mode === 'failover' || s.auto_select_mode === 'speed' ? '' : 'on'}"><span class="o-t">定时全量测优<small>每间隔测一遍全部节点 · 默认</small></span></button>
-          <button type="button" data-mode="failover" class="${s.auto_select_mode === 'failover' ? 'on' : ''}"><span class="o-t">故障才切换<small>只保活探测当前节点 · 省资源</small></span></button>
-          <button type="button" data-mode="speed" class="${s.auto_select_mode === 'speed' ? 'on' : ''}"><span class="o-t">带宽优先<small>固定用 Mbps 最高的节点</small></span></button>
+          <button type="button" data-mode="interval" title="${MODE_TIP.interval}" class="${s.auto_select_mode === 'failover' || s.auto_select_mode === 'speed' ? '' : 'on'}">定时全量测优</button>
+          <button type="button" data-mode="failover" title="${MODE_TIP.failover}" class="${s.auto_select_mode === 'failover' ? 'on' : ''}">故障才切换</button>
+          <button type="button" data-mode="speed" title="${MODE_TIP.speed}" class="${s.auto_select_mode === 'speed' ? 'on' : ''}">带宽优先</button>
         </div>
+        <p class="mode-hint" id="cfgModeHint"></p>
       </div>
-      <div id="cfgItvWrap" style="display:${s.auto_select_mode === 'interval' ? '' : 'none'}">
-        <div class="cfg-grid">
-          <div class="field"><label>自动选优间隔（分钟）</label><input class="input" id="cfgItv" type="number" min="1" max="1440" value="${s.urltest_interval_min ?? 10}" /></div>
-          <div class="field"><label>切换容差（ms）</label><input class="input" id="cfgTol" type="number" min="1" max="1000" value="${s.urltest_tolerance ?? 50}" /></div>
-        </div>
-        <div class="hint">内核 auto 策略组每隔该间隔测一遍全部启用节点，自动切到延迟最低的线路；新节点要比当前快出容差以上才会切换，防止来回抖动。</div>
+      <div class="cfg-grid" id="cfgItvWrap">
+        <div class="field"><label>间隔（分钟）</label><input class="input" id="cfgItv" type="number" min="1" max="1440" value="${s.urltest_interval_min ?? 10}" /></div>
+        <div class="field"><label>容差（ms）</label><input class="input" id="cfgTol" type="number" min="1" max="1000" value="${s.urltest_tolerance ?? 50}" /></div>
       </div>
-      <div id="cfgFailHint" style="display:${s.auto_select_mode === 'failover' ? '' : 'none'}">
-        <div class="hint">面板每 30 秒探测一次当前出口节点（单节点单请求），连续 2 次失败才全量重测全部启用节点并切到延迟最低的可用线路。内核侧只保留 24 小时一次的兜底全测。</div>
-      </div>
-      <div id="cfgSpeedHint" style="display:${s.auto_select_mode === 'speed' ? '' : 'none'}">
-        <div class="hint">流量固定在带宽测速结果最高的节点（候选要高出当前 25% 才切换，防止抖动）；当前节点故障时按带宽从高到低逐个探活切换，没有带宽数据时回落到延迟选优。请先跑一次「带宽测速」生成数据。内核侧只保留 24 小时一次的兜底全测。</div>
-      </div>
-      <div class="field"><label>连通性测速 URL（延迟）</label><input class="input mono-input" id="cfgDelayUrl" value="${esc(s.delay_test_url || '')}" /></div>
+      <div class="dlg-sep"></div>
+      <div class="field"><label>连通性测速 URL</label><input class="input mono-input" id="cfgDelayUrl" value="${esc(s.delay_test_url || '')}" /></div>
       <div class="field"><label>带宽测速 URL</label><input class="input mono-input" id="cfgSpeedUrl" value="${esc(s.speed_test_url || '')}" /></div>
       <div class="cfg-grid">
-        <div class="field"><label>单节点带宽测速时长（秒）</label><input class="input" id="cfgSto" type="number" min="3" max="60" value="${s.speed_timeout_sec ?? 10}" /></div>
-        <div class="field"><label>延迟测速并发</label><input class="input" id="cfgWrk" type="number" min="1" max="16" value="${s.delay_workers ?? 3}" /></div>
+        <div class="field"><label>测速时长（秒）</label><input class="input" id="cfgSto" type="number" min="3" max="60" value="${s.speed_timeout_sec ?? 10}" /></div>
+        <div class="field"><label>测速并发</label><input class="input" id="cfgWrk" type="number" min="1" max="16" value="${s.delay_workers ?? 3}" title="同一时刻实测的节点数；带宽测速固定串行" /></div>
       </div>
-      <div class="hint">延迟测速并发 = 同一时刻最多实测几个节点，改成 1 就是一个一个测，占用最低（带宽测速固定串行）。</div>
-      <div class="opt">
-        <div class="opt-main">
-          <div class="opt-title">超时自动停用节点</div>
-          <div class="opt-sub">延迟测速超时的节点自动置为停用，下次生成配置后生效</div>
-        </div>
+      <div class="dlg-sep"></div>
+      <div class="opt" title="延迟测速超时的节点自动停用，下次生成配置后生效">
+        <div class="opt-main"><div class="opt-title">超时自动停用</div></div>
         <button type="button" class="switch sm ${s.auto_disable_timeout ? 'on' : ''}" id="cfgAutoDis" role="switch" aria-checked="${!!s.auto_disable_timeout}"></button>
       </div>
-      <div class="callout note-warn"><svg width="14" height="14"><use href="#i-info"/></svg><div>修改选优方式 / 间隔 / 容差 / 测速 URL 会重新生成并下发配置，核心短暂中断几秒。带宽测速逐节点串行执行，期间会临时切换出口节点，测完自动恢复。</div></div>
     </div>
     <div class="dialog-ft">
       <button class="btn" onclick="closeDialog(false)">取消</button>
-      <button class="btn primary" id="spdCfgOk">保存</button>
+      <button class="btn primary" id="spdCfgOk" title="修改选优方式或测速 URL 会重新下发配置，核心短暂重启">保存</button>
     </div>`;
   $('#dialogOverlay').classList.add('open');
   let cfgMode = ['failover', 'speed'].includes(s.auto_select_mode) ? s.auto_select_mode : 'interval';
   const syncModeUI = () => {
     $('#cfgItvWrap').style.display = cfgMode === 'interval' ? '' : 'none';
-    $('#cfgFailHint').style.display = cfgMode === 'failover' ? '' : 'none';
-    $('#cfgSpeedHint').style.display = cfgMode === 'speed' ? '' : 'none';
+    $('#cfgModeHint').textContent = MODE_HINT[cfgMode];
   };
+  syncModeUI();
   $$('#cfgMode button').forEach((b) => (b.onclick = () => {
     $$('#cfgMode button').forEach((x) => x.classList.remove('on'));
     b.classList.add('on');
@@ -1095,14 +1095,11 @@ async function openSpeedCfg() {
     try {
       const r = await api('/api/v1/settings/speedtest', { method: 'PUT', body: JSON.stringify(body) });
       closeDialog(true);
-      if (r.applied) {
-        toast('ok', '测速设置已保存',
-          body.auto_select_mode === 'failover' ? '已切换为故障才切换模式，配置已下发内核' : 'auto 策略组已更新并下发到内核');
-      } else if (r.reason) {
+      if (r.reason) {
         // 典型：还没有启用的节点。设置已保存，等启用节点后生成配置生效
-        toast('info', '测速设置已保存', `${r.reason}；启用节点后点「生成配置」即生效`);
+        toast('info', '已保存', `${r.reason}；启用节点后点「生成配置」即生效`);
       } else {
-        toast('ok', '测速设置已保存', '非内核项已生效，内核项下次生成配置时生效');
+        toast('ok', '已保存', r.applied ? '配置已重新下发到内核' : '非内核项已生效');
       }
       if (r.settings?.delay_workers) $('#workersChip').textContent = `并发上限 ${r.settings.delay_workers}`;
     } catch (e) {
