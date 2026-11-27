@@ -14,6 +14,7 @@ const state = {
   subs: [],
   nodes: [],
   delays: {},
+  speeds: {},
   snapshots: [],
   configRaw: '',
   logs: [],
@@ -22,6 +23,10 @@ const state = {
   paused: false,
   page: 'dashboard',
   testRunning: false,
+  speedRunning: false,
+  // 节点表排序：默认速度优先（快的在前），无数据/失败垫底
+  nodeSort: { key: 'speed', dir: 'desc' },
+  delaysSig: '',
   // 运行时按需填充的接口数据（初始声明便于阅读与调试）
   tproxy: null, tun: null, lanproxy: null, routing: null, sysproxy: null,
   autostart: null, geo: null
@@ -148,6 +153,56 @@ function latText(v) {
   return v < 0 ? '超时' : v + ' ms';
 }
 
+// 带宽测速结果（bps）：undefined = 从未测过；<0 = 测速失败
+function spdText(v) {
+  if (v === undefined || v === null) return '—';
+  if (v < 0) return '失败';
+  const mb = v / 1e6;
+  if (mb >= 100) return Math.round(mb) + ' Mbps';
+  if (mb >= 1) return mb.toFixed(1) + ' Mbps';
+  return Math.max(1, Math.round(v / 1e3)) + ' Kbps';
+}
+
+function spdClass(v) {
+  if (v === undefined || v === null) return 'none';
+  if (v < 0) return 'bad';
+  const mb = v / 1e6;
+  if (mb >= 20) return 'good';
+  if (mb >= 5) return 'ok';
+  if (mb >= 1) return 'mid';
+  return 'bad';
+}
+
+// 相对时间（测速结果的时间戳悬浮提示用）
+function agoText(at) {
+  if (!at) return '';
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - at);
+  if (s < 60) return `${s} 秒前测得`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前测得`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前测得`;
+  return `${Math.floor(s / 86400)} 天前测得`;
+}
+
+// 节点表排序：有效值按方向排；失败(-1)垫底、无数据再垫底（与方向无关）
+function sortNodeRows(rows) {
+  const { key, dir } = state.nodeSort;
+  const mul = dir === 'asc' ? 1 : -1;
+  const val = (n) => (key === 'speed'
+    ? (state.speeds[n.tag] ? state.speeds[n.tag].bps : null)
+    : (state.delays[n.tag] ? state.delays[n.tag].ms : null));
+  return rows.slice().sort((a, b) => {
+    const va = val(a), vb = val(b);
+    const na = va === null || va === undefined, nb = vb === null || vb === undefined;
+    if (na && nb) return 0;
+    if (na) return 1;
+    if (nb) return -1;
+    if (va < 0 && vb < 0) return 0;
+    if (va < 0) return 1;
+    if (vb < 0) return -1;
+    return (va - vb) * mul;
+  });
+}
+
 function regionColor(code) {
   let h = 0;
   for (const ch of code || '??') h = (h * 31 + ch.charCodeAt(0)) % 360;
@@ -250,20 +305,41 @@ function showLogin() {
   $('#login').classList.add('open');
   $('#loginBtn').textContent = '登录';
   $('#loginPass2Field').style.display = 'none';
+  $('#loginSkip').style.display = 'none';
   $('#loginErr').textContent = '';
   setTimeout(() => $('#loginPass')?.focus(), 200);
 }
 
-// 首次启动初始化：复用登录页，多一个确认密码框，提交走 /auth/setup
+// 首次启动初始化：复用登录页，多一个确认密码框，提交走 /auth/setup。
+// 也提供「不设置密码」：登录保持关闭，拿到 web 端口就能直接访问面板。
 function showSetup() {
   state.setupMode = true;
   $('#app').style.display = 'none';
   $('#login').classList.add('open');
   $('#loginBtn').textContent = '完成初始化';
   $('#loginPass2Field').style.display = '';
+  $('#loginSkip').style.display = '';
   $('#loginErr').textContent = '';
   setTimeout(() => $('#loginUser')?.focus(), 200);
 }
+
+// 初始化时选择免密访问：后端置 login_disabled，随后 boot + 弹出配置向导
+$('#loginSkip').onclick = async () => {
+  const btn = $('#loginSkip');
+  btn.disabled = true;
+  $('#loginErr').textContent = '';
+  try {
+    await api('/api/v1/auth/setup', { method: 'POST', body: JSON.stringify({ skip: true }) });
+    state.setupMode = false;
+    state.needsSetup = false;
+    state.authRequired = false;
+    $('#logoutBtn').style.display = 'none';
+    await boot();
+  } catch (e) {
+    $('#loginErr').textContent = e.message || '操作失败';
+    btn.disabled = false;
+  }
+};
 
 function logout() {
   // 免登录模式下没有可退回的登录页，退出按钮已隐藏。
@@ -342,12 +418,26 @@ async function boot() {
   loadEngine();
   pollTimers.forEach(clearInterval);
   pollTimers = [setInterval(pollStatus, 5000), setInterval(pollLogs, 3000)];
+  // 首次运行向导：仅全新实例（无订阅、无已下发配置、未标记完成）弹出
+  try {
+    const info = await fetch('/api/v1/auth/status').then((r) => r.json());
+    if (info.first_run) showWizard();
+  } catch (e) { /* 瞬时失败不影响主流程 */ }
 }
 
 async function pollStatus() {
   try {
     state.status = await api('/api/v1/status');
     renderStatus();
+    // 后台测速（订阅更新自动测速 / failover 探测）产生的延迟变化：
+    // 数据有变才重渲染，避免每 5 秒无谓刷新表格
+    const dj = JSON.stringify(state.status.delays || {});
+    if (dj !== state.delaysSig) {
+      state.delaysSig = dj;
+      state.delays = state.status.delays || {};
+      renderNodes();
+      renderDashNodes();
+    }
     loadTun();
     loadSysproxy();
     loadExitIp();
@@ -364,6 +454,7 @@ async function loadNodes() {
   const d = await api('/api/v1/nodes');
   state.nodes = d.nodes || [];
   state.delays = d.delays || {};
+  state.speeds = d.speeds || {};
 }
 
 async function loadConfig() {
@@ -804,16 +895,26 @@ function renderNodes() {
     renderNodes();
   }));
 
-  const rows = filteredNodes();
+  // 排序表头指示
+  $$('#nodeTable thead th.sortable').forEach((th) => {
+    const on = th.dataset.sort === state.nodeSort.key;
+    th.classList.toggle('sort-on', on);
+    th.classList.toggle('sort-asc', on && state.nodeSort.dir === 'asc');
+  });
+
+  const rows = sortNodeRows(filteredNodes());
   const tbody = $('#nodeTable tbody');
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-cell">
       ${state.nodes.length ? '没有匹配的节点' : '还没有节点，先去「订阅」页添加订阅'}</td></tr>`;
   } else {
     tbody.innerHTML = rows.map((n) => {
       const d = state.delays[n.tag];
       const ms = d ? d.ms : undefined;
       const c = latClass(ms);
+      const sp = state.speeds[n.tag];
+      const bps = sp ? sp.bps : undefined;
+      const sc = spdClass(bps);
       return `<tr>
         <td><div class="cell-main">
           <span class="flag" style="background:${regionColor(n.region)}">${esc(n.region || '??')}</span>
@@ -822,14 +923,19 @@ function renderNodes() {
         <td><span class="badge mono p-${esc(n.type)}">${esc(n.type)}</span></td>
         <td><div class="cell-addr">${esc(n.server)}:${n.port}</div></td>
         <td><span class="lat ${c}">${latText(ms)}</span></td>
+        <td><span class="lat spd ${sc}" ${sp && sp.at ? `title="${esc(agoText(sp.at))}"` : ''}>${spdText(bps)}</span></td>
         <td><button class="switch sm ${n.enabled ? 'on' : ''}" data-toggle="${n.id}" role="switch" aria-checked="${!!n.enabled}"></button></td>
-        <td class="t-right"><button class="btn ghost xs" data-ping="${esc(n.tag)}">测速</button></td>
+        <td class="t-right">
+          <button class="btn ghost xs" data-ping="${esc(n.tag)}">测速</button>
+          <button class="btn ghost xs" data-speed="${esc(n.tag)}">带宽</button>
+        </td>
       </tr>`;
     }).join('');
   }
 
   $$('[data-toggle]').forEach((b) => (b.onclick = () => toggleNode(b.dataset.toggle, b)));
   $$('[data-ping]').forEach((b) => (b.onclick = () => testOne(b.dataset.ping)));
+  $$('[data-speed]').forEach((b) => (b.onclick = () => speedOne(b.dataset.speed)));
 
   const enabled = state.nodes.filter((n) => n.enabled).length;
   $('#nodeFoot').textContent = `显示 ${rows.length} 个节点 · 已启用 ${enabled} 个`;
@@ -875,9 +981,16 @@ async function testAll() {
     const d = await api('/api/v1/nodes/delay', { method: 'POST', body: JSON.stringify({ tags, refresh }) });
     state.delays = d.delays;
     const cached = d.cached || 0;
+    const disabled = d.disabled || [];
     $('#stProgress').textContent = `完成 ${tags.length}/${tags.length}` + (cached ? ` · ${cached} 缓存` : '');
+    if (disabled.length) {
+      // 超时自动停用：后端已改库，前端拉一次最新节点表
+      await loadNodes();
+    }
     renderNodes(); renderDashNodes(); renderStatus();
-    toast('ok', '测速完成', cached ? `实测 ${tags.length - cached} 个，${cached} 个命中缓存` : `${tags.length} 个节点全部实测`);
+    toast('ok', '测速完成',
+      (cached ? `实测 ${tags.length - cached} 个，${cached} 个命中缓存` : `${tags.length} 个节点全部实测`)
+      + (disabled.length ? ` · 已自动停用 ${disabled.length} 个超时节点` : ''));
   } catch (e) {
     toast('err', '测速失败', e.message);
   } finally {
@@ -885,6 +998,335 @@ async function testAll() {
     $('#testAllBtn').disabled = false;
   }
 }
+
+/* ------------------------------------------------------------ 带宽测速 */
+
+async function speedOne(tag) {
+  if (!state.status?.running) { toast('err', '核心未运行', `先到服务页启动 ${eng()}`); return; }
+  await runSpeedTest([tag]);
+}
+
+async function speedAll() {
+  if (state.speedRunning) return;
+  if (!state.status?.running) { toast('err', '核心未运行', `先到服务页启动 ${eng()}`); return; }
+  await runSpeedTest(filteredNodes().map((n) => n.tag));
+}
+
+// 带宽测速是串行的（后端要逐个临时切换出口节点），期间禁止再次触发
+async function runSpeedTest(tags) {
+  if (state.speedRunning) return;
+  state.speedRunning = true;
+  $('#speedAllBtn').disabled = true;
+  const prev = $('#stProgress').textContent;
+  $('#stProgress').textContent = `带宽测速中… 0/${tags.length}`;
+  try {
+    const d = await api('/api/v1/nodes/speed', { method: 'POST', body: JSON.stringify({ tags }) });
+    state.speeds = d.speeds || state.speeds;
+    const ok = (d.results || []).filter((r) => r.bps >= 0).length;
+    const fail = (d.results || []).length - ok;
+    $('#stProgress').textContent = `带宽完成 ${ok}/${tags.length}` + (fail ? ` · ${fail} 失败` : '');
+    renderNodes();
+    toast('ok', '带宽测速完成', `${ok} 个成功${fail ? `，${fail} 个失败` : ''}`);
+  } catch (e) {
+    $('#stProgress').textContent = prev;
+    toast('err', '带宽测速失败', e.message);
+  } finally {
+    state.speedRunning = false;
+    $('#speedAllBtn').disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------ 测速设置弹窗（齿轮） */
+
+async function openSpeedCfg() {
+  let s;
+  try { s = await api('/api/v1/settings/speedtest'); }
+  catch (e) { toast('err', '读取测速设置失败', e.message); return; }
+  $('#dialog').innerHTML = `
+    <div class="dialog-hd"><h3>测速设置</h3></div>
+    <div class="dialog-bd">
+      <div class="field"><label>自动选优方式</label>
+        <div class="seg-opts wz-fill" id="cfgMode">
+          <button type="button" data-mode="interval" class="${s.auto_select_mode !== 'failover' ? 'on' : ''}"><span class="o-t">定时全量测优<small>每间隔测一遍全部节点 · 默认</small></span></button>
+          <button type="button" data-mode="failover" class="${s.auto_select_mode === 'failover' ? 'on' : ''}"><span class="o-t">故障才切换<small>只保活探测当前节点 · 省资源</small></span></button>
+        </div>
+      </div>
+      <div id="cfgItvWrap" style="display:${s.auto_select_mode === 'failover' ? 'none' : ''}">
+        <div class="cfg-grid">
+          <div class="field"><label>自动选优间隔（分钟）</label><input class="input" id="cfgItv" type="number" min="1" max="1440" value="${s.urltest_interval_min ?? 10}" /></div>
+          <div class="field"><label>切换容差（ms）</label><input class="input" id="cfgTol" type="number" min="1" max="1000" value="${s.urltest_tolerance ?? 50}" /></div>
+        </div>
+        <div class="hint">内核 auto 策略组每隔该间隔测一遍全部启用节点，自动切到延迟最低的线路；新节点要比当前快出容差以上才会切换，防止来回抖动。</div>
+      </div>
+      <div id="cfgFailHint" style="display:${s.auto_select_mode === 'failover' ? '' : 'none'}">
+        <div class="hint">面板每 30 秒探测一次当前出口节点（单节点单请求），连续 2 次失败才全量重测全部启用节点并切到延迟最低的可用线路。内核侧只保留 24 小时一次的兜底全测。</div>
+      </div>
+      <div class="field"><label>连通性测速 URL（延迟）</label><input class="input mono-input" id="cfgDelayUrl" value="${esc(s.delay_test_url || '')}" /></div>
+      <div class="field"><label>带宽测速 URL</label><input class="input mono-input" id="cfgSpeedUrl" value="${esc(s.speed_test_url || '')}" /></div>
+      <div class="cfg-grid">
+        <div class="field"><label>单节点带宽测速时长（秒）</label><input class="input" id="cfgSto" type="number" min="3" max="60" value="${s.speed_timeout_sec ?? 10}" /></div>
+        <div class="field"><label>延迟测速并发</label><input class="input" id="cfgWrk" type="number" min="1" max="16" value="${s.delay_workers ?? 3}" /></div>
+      </div>
+      <div class="hint">延迟测速并发 = 同一时刻最多实测几个节点，改成 1 就是一个一个测，占用最低（带宽测速固定串行）。</div>
+      <div class="opt">
+        <div class="opt-main">
+          <div class="opt-title">超时自动停用节点</div>
+          <div class="opt-sub">延迟测速超时的节点自动置为停用，下次生成配置后生效</div>
+        </div>
+        <button type="button" class="switch sm ${s.auto_disable_timeout ? 'on' : ''}" id="cfgAutoDis" role="switch" aria-checked="${!!s.auto_disable_timeout}"></button>
+      </div>
+      <div class="callout note-warn"><svg width="14" height="14"><use href="#i-info"/></svg><div>修改选优方式 / 间隔 / 容差 / 测速 URL 会重新生成并下发配置，核心短暂中断几秒。带宽测速逐节点串行执行，期间会临时切换出口节点，测完自动恢复。</div></div>
+    </div>
+    <div class="dialog-ft">
+      <button class="btn" onclick="closeDialog(false)">取消</button>
+      <button class="btn primary" id="spdCfgOk">保存</button>
+    </div>`;
+  $('#dialogOverlay').classList.add('open');
+  let cfgMode = s.auto_select_mode === 'failover' ? 'failover' : 'interval';
+  $$('#cfgMode button').forEach((b) => (b.onclick = () => {
+    $$('#cfgMode button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    cfgMode = b.dataset.mode;
+    $('#cfgItvWrap').style.display = cfgMode === 'failover' ? 'none' : '';
+    $('#cfgFailHint').style.display = cfgMode === 'failover' ? '' : 'none';
+  }));
+  $('#cfgAutoDis').onclick = () => {
+    const on = $('#cfgAutoDis').classList.toggle('on');
+    $('#cfgAutoDis').setAttribute('aria-checked', String(on));
+  };
+  $('#spdCfgOk').onclick = async () => {
+    const body = {
+      auto_select_mode: cfgMode,
+      urltest_interval_min: parseInt($('#cfgItv').value, 10) || 10,
+      urltest_tolerance: parseInt($('#cfgTol').value, 10) || 50,
+      delay_test_url: $('#cfgDelayUrl').value.trim(),
+      speed_test_url: $('#cfgSpeedUrl').value.trim(),
+      speed_timeout_sec: parseInt($('#cfgSto').value, 10) || 10,
+      auto_disable_timeout: $('#cfgAutoDis').classList.contains('on'),
+      delay_workers: parseInt($('#cfgWrk').value, 10) || 3
+    };
+    const btn = $('#spdCfgOk');
+    btn.disabled = true; btn.textContent = '保存中…';
+    try {
+      const r = await api('/api/v1/settings/speedtest', { method: 'PUT', body: JSON.stringify(body) });
+      closeDialog(true);
+      toast('ok', '测速设置已保存',
+        r.applied
+          ? (body.auto_select_mode === 'failover' ? '已切换为故障才切换模式，配置已下发内核' : 'auto 策略组已更新并下发到内核')
+          : '非内核项已生效，内核项下次生成配置时生效');
+      if (r.settings?.delay_workers) $('#workersChip').textContent = `并发上限 ${r.settings.delay_workers}`;
+    } catch (e) {
+      toast('err', '保存失败', e.message);
+      btn.disabled = false; btn.textContent = '保存';
+    }
+  };
+}
+
+/* ------------------------------------------------------------ 首次运行向导 */
+
+// 仅全新实例弹出（后端 first_run：无订阅、无已下发配置、未标记完成）。
+// 分步：订阅 → 代理模式/本机端口 → 局域网代理 → 完成应用。
+const WIZARD_STEPS = ['添加订阅', '代理模式', '局域网代理', '完成'];
+let wz = null;
+
+function showWizard() {
+  wz = {
+    step: 0,
+    added: 0,
+    mixed_port: state.status?.mixed_port || 7890,
+    mixed_listen: '127.0.0.1',
+    routing_mode: 'rule',
+    lan_proxy: false,
+    lan_socks_port: state.lanproxy?.socks_port || 1080,
+    lan_http_port: state.lanproxy?.http_port || 8118,
+    lan_user: '',
+    lan_pass: '',
+    sysproxy: false
+  };
+  $('#wizardOverlay').classList.add('open');
+  renderWizard();
+}
+
+function closeWizard() {
+  $('#wizardOverlay').classList.remove('open');
+  wz = null;
+}
+
+function bindWzSeg(sel, key) {
+  $$(sel + ' button').forEach((b) => (b.onclick = () => {
+    $$(sel + ' button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    wz[key] = b.dataset.mode || b.dataset.listen;
+  }));
+}
+
+function renderWizard() {
+  const s = wz.step;
+  const dots = WIZARD_STEPS.map((t, i) =>
+    `<div class="wz-dot ${i === s ? 'on' : i < s ? 'done' : ''}"><i></i><span>${t}</span></div>`).join('');
+  let body = '';
+  if (s === 0) {
+    body = `
+      <div class="field"><label>订阅链接</label><input class="input mono-input" id="wzSubUrl" placeholder="https://… 粘贴机场或自建订阅地址" /></div>
+      <div class="field"><label>备注名称（可选）</label><input class="input" id="wzSubName" placeholder="例如：主订阅" /></div>
+      ${wz.added ? `<div class="hint wz-ok">已添加 ${wz.added} 个订阅，可继续添加或进入下一步</div>` : ''}
+      <div class="callout note-warn"><svg width="14" height="14"><use href="#i-info"/></svg><div>节点来自订阅（Clash / Base64 / sing-box JSON 自动识别）。暂时没有订阅可以先跳过，之后随时在「订阅」页添加。</div></div>`;
+  } else if (s === 1) {
+    body = `
+      <div class="field"><label>路由模式</label>
+        <div class="seg-opts wz-fill" id="wzRoute">
+          <button type="button" data-mode="rule" class="${wz.routing_mode === 'rule' ? 'on' : ''}"><span class="o-t">规则分流<small>国内直连、国外走节点 · 推荐</small></span></button>
+          <button type="button" data-mode="global" class="${wz.routing_mode === 'global' ? 'on' : ''}"><span class="o-t">全局代理<small>全部流量走节点</small></span></button>
+          <button type="button" data-mode="direct" class="${wz.routing_mode === 'direct' ? 'on' : ''}"><span class="o-t">全局直连<small>不经节点</small></span></button>
+        </div>
+      </div>
+      <div class="cfg-grid">
+        <div class="field"><label>本机代理端口</label><input class="input" id="wzMixPort" type="number" min="1024" max="65535" value="${wz.mixed_port}" /></div>
+        <div class="field"><label>监听范围</label>
+          <div class="seg-opts" id="wzListen">
+            <button type="button" data-listen="127.0.0.1" class="${wz.mixed_listen === '127.0.0.1' ? 'on' : ''}"><span class="o-t">仅本机<small>127.0.0.1</small></span></button>
+            <button type="button" data-listen="0.0.0.0" class="${wz.mixed_listen !== '127.0.0.1' ? 'on' : ''}"><span class="o-t">局域网<small>0.0.0.0</small></span></button>
+          </div>
+        </div>
+      </div>
+      ${isWindowsClient() ? `
+      <div class="opt">
+        <div class="opt-main">
+          <div class="opt-title">设置系统代理</div>
+          <div class="opt-sub">把系统 HTTP 代理指向本机端口，浏览器自动走代理（可随时在「代理模式」页关闭）</div>
+        </div>
+        <button type="button" class="switch sm" id="wzSysproxy" role="switch" aria-checked="false"></button>
+      </div>` : ''}
+      <div class="hint">本机端口是浏览器 / 程序填写 HTTP 或 SOCKS 代理的入口。</div>`;
+  } else if (s === 2) {
+    body = `
+      <div class="opt">
+        <div class="opt-main">
+          <div class="opt-title">开启局域网代理</div>
+          <div class="opt-sub">为手机、平板等局域网设备提供 SOCKS5 / HTTP 代理入口</div>
+        </div>
+        <button type="button" class="switch sm ${wz.lan_proxy ? 'on' : ''}" id="wzLan" role="switch" aria-checked="${wz.lan_proxy}"></button>
+      </div>
+      <div id="wzLanBody" style="display:${wz.lan_proxy ? '' : 'none'}">
+        <div class="cfg-grid">
+          <div class="field"><label>SOCKS5 端口</label><input class="input" id="wzSocks" type="number" min="1024" max="65535" value="${wz.lan_socks_port}" /></div>
+          <div class="field"><label>HTTP 端口</label><input class="input" id="wzHttp" type="number" min="1024" max="65535" value="${wz.lan_http_port}" /></div>
+        </div>
+        <div class="cfg-grid">
+          <div class="field"><label>用户名（可选）</label><input class="input" id="wzLanUser" value="${esc(wz.lan_user)}" placeholder="留空 = 不鉴权" /></div>
+          <div class="field"><label>密码（可选）</label><input class="input" id="wzLanPass" type="password" value="${esc(wz.lan_pass)}" placeholder="留空 = 不鉴权" /></div>
+        </div>
+        <div class="callout warn note-warn"><svg width="14" height="14"><use href="#i-alert"/></svg><div>不填账号密码 = 开放代理，局域网内能连到端口的设备都可免密使用。</div></div>
+      </div>`;
+  } else {
+    const modeName = { rule: '规则分流', global: '全局代理', direct: '全局直连' }[wz.routing_mode] || '规则分流';
+    body = `
+      <div class="wz-sum">
+        <div class="kv"><span class="k">订阅</span><span class="badge">${wz.added ? `${wz.added} 个` : '暂未添加'}</span></div>
+        <div class="kv"><span class="k">路由模式</span><span class="badge">${modeName}</span></div>
+        <div class="kv"><span class="k">本机代理</span><span class="badge mono">${esc(wz.mixed_listen)}:${wz.mixed_port}</span></div>
+        <div class="kv"><span class="k">局域网代理</span><span class="badge">${wz.lan_proxy ? `已开启（${wz.lan_socks_port} / ${wz.lan_http_port}）` : '不开启'}</span></div>
+        ${isWindowsClient() ? `<div class="kv"><span class="k">系统代理</span><span class="badge">${wz.sysproxy ? '设置' : '不设置'}</span></div>` : ''}
+      </div>
+      <div class="hint">点「完成并应用」后自动生成配置并启动核心；还没有启用节点时只保存设置，稍后在「节点」页启用节点并点「生成配置」即可。</div>`;
+  }
+  $('#wizard').innerHTML = `
+    <div class="wizard-hd">
+      <div class="brand-mark"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 2.6 20 7v10l-8 4.4L4 17V7z"/><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/></svg></div>
+      <div class="wz-title"><h3>欢迎使用 sing-box panel</h3><p>第一次使用，跟着引导完成基础配置（共 ${WIZARD_STEPS.length} 步）</p></div>
+      <button class="btn ghost xs" id="wzSkipAll">跳过向导</button>
+    </div>
+    <div class="wizard-dots">${dots}</div>
+    <div class="wizard-bd">${body}</div>
+    <div class="wizard-ft">
+      ${s > 0 ? '<button class="btn" id="wzPrev">上一步</button>' : '<span></span>'}
+      <button class="btn primary" id="wzNext">${s === WIZARD_STEPS.length - 1 ? '完成并应用' : '下一步'}</button>
+    </div>`;
+
+  // 绑定
+  $('#wzSkipAll').onclick = async () => {
+    try { await api('/api/v1/setup/complete', { method: 'POST' }); } catch (e) { /* 已完成也没关系 */ }
+    closeWizard();
+    toast('info', '已跳过向导', '可随时在「订阅」「代理模式」「局域网代理」页完成配置');
+  };
+  const prev = $('#wzPrev');
+  if (prev) prev.onclick = () => { wz.step = Math.max(0, s - 1); renderWizard(); };
+  $('#wzNext').onclick = () => wizardNext(s);
+  if (s === 0) {
+    $('#wzSubUrl')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#wzNext').click(); } });
+  }
+  if (s === 1) {
+    bindWzSeg('#wzRoute', 'routing_mode');
+    bindWzSeg('#wzListen', 'mixed_listen');
+    $('#wzMixPort').oninput = (e) => { wz.mixed_port = parseInt(e.target.value, 10) || 0; };
+    const sys = $('#wzSysproxy');
+    if (sys) sys.onclick = () => {
+      wz.sysproxy = !wz.sysproxy;
+      sys.classList.toggle('on', wz.sysproxy);
+      sys.setAttribute('aria-checked', String(wz.sysproxy));
+    };
+  }
+  if (s === 2) {
+    $('#wzLan').onclick = () => {
+      wz.lan_proxy = !wz.lan_proxy;
+      $('#wzLan').classList.toggle('on', wz.lan_proxy);
+      $('#wzLan').setAttribute('aria-checked', String(wz.lan_proxy));
+      $('#wzLanBody').style.display = wz.lan_proxy ? '' : 'none';
+    };
+    $('#wzSocks').oninput = (e) => { wz.lan_socks_port = parseInt(e.target.value, 10) || 0; };
+    $('#wzHttp').oninput = (e) => { wz.lan_http_port = parseInt(e.target.value, 10) || 0; };
+    $('#wzLanUser').oninput = (e) => { wz.lan_user = e.target.value.trim(); };
+    $('#wzLanPass').oninput = (e) => { wz.lan_pass = e.target.value; };
+  }
+}
+
+function isWindowsClient() {
+  return (state.status?.platform || navigator.platform || '').toLowerCase().includes('win');
+}
+
+async function wizardNext(s) {
+  if (s === 0) {
+    const url = $('#wzSubUrl')?.value.trim();
+    const name = $('#wzSubName')?.value.trim();
+    if (url) {
+      try {
+        await api('/api/v1/subscriptions', { method: 'POST', body: JSON.stringify({ url, name }) });
+        wz.added += 1;
+        toast('ok', '订阅已添加', '节点正在解析入库');
+      } catch (e) {
+        toast('err', '订阅添加失败', e.message);
+        return; // 留在本步修正
+      }
+    }
+    wz.step = 1;
+  } else if (s === 1) {
+    wz.mixed_port = parseInt($('#wzMixPort')?.value, 10) || wz.mixed_port;
+    wz.step = 2;
+  } else if (s === 2) {
+    wz.step = 3;
+  } else {
+    const btn = $('#wzNext');
+    btn.disabled = true; btn.textContent = '应用中…';
+    try {
+      const r = await api('/api/v1/setup/finish', { method: 'POST', body: JSON.stringify(wz) });
+      closeWizard();
+      if (r.applied) {
+        toast('ok', '初始化完成', '配置已生成，核心已启动');
+      } else {
+        toast('info', '设置已保存', r.reason ? `还没有可启用节点（${r.reason}），启用节点后点「生成配置」` : '还没有可启用节点，启用节点后点「生成配置」');
+      }
+      await Promise.allSettled([loadSubs(), loadNodes(), loadLanProxy(), loadRouting(), loadSysproxy(), pollStatus()]);
+      renderAll();
+    } catch (e) {
+      toast('err', '应用失败', e.message);
+      btn.disabled = false; btn.textContent = '完成并应用';
+    }
+    return;
+  }
+  renderWizard();
+}
+
+
 
 /* ------------------------------------------------------------ render: dashboard nodes */
 
@@ -1400,11 +1842,25 @@ async function serviceAction(action) {
 }
 
 $$('[data-action]').forEach((b) => (b.onclick = () => serviceAction(b.dataset.action)));
+// 节点表排序表头：点击切换方向，默认速度优先
+$$('#nodeTable thead th.sortable').forEach((th) => {
+  th.onclick = () => {
+    const k = th.dataset.sort;
+    if (state.nodeSort.key === k) {
+      state.nodeSort.dir = state.nodeSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.nodeSort = { key: k, dir: k === 'speed' ? 'desc' : 'asc' };
+    }
+    renderNodes();
+  };
+});
 $('#refreshBtn').onclick = async () => {
   await Promise.all([pollStatus(), loadLogs()]);
   toast('ok', '已刷新', '状态与日志已重新拉取');
 };
 $('#testAllBtn').onclick = testAll;
+$('#speedAllBtn').onclick = speedAll;
+$('#speedCfgBtn').onclick = openSpeedCfg;
 $('#refreshAllBtn').onclick = async () => {
   for (const s of state.subs) await refreshSub(s.id);
 };

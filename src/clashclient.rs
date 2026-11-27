@@ -14,6 +14,8 @@ pub struct Client {
     http: reqwest::Client,
     delays: Mutex<HashMap<String, (i64, i64)>>, // tag -> (ms, at_unix)
     ttl: AtomicU64,                             // seconds
+    /// 连通性测速 URL（面板设置里可改），启动与设置变更时更新。
+    delay_url: Mutex<String>,
 }
 
 impl Client {
@@ -28,6 +30,7 @@ impl Client {
             http,
             delays: Mutex::new(HashMap::new()),
             ttl: AtomicU64::new(300),
+            delay_url: Mutex::new(crate::model::DEFAULT_DELAY_TEST_URL.to_string()),
         }
     }
 
@@ -38,6 +41,15 @@ impl Client {
 
     pub fn set_ttl(&self, secs: i64) {
         self.ttl.store(secs.max(1) as u64, Ordering::Relaxed);
+    }
+
+    /// 更新连通性测速 URL（面板设置变更时调用）。
+    pub fn set_delay_url(&self, url: &str) {
+        let url = url.trim();
+        if url.is_empty() {
+            return;
+        }
+        *self.delay_url.lock().unwrap() = url.to_string();
     }
 
     pub async fn version(&self) -> Result<String, String> {
@@ -84,11 +96,12 @@ impl Client {
 
     /// 通过 Clash API 测一个节点的延迟。结果写内存缓存并带过期时间。
     pub async fn delay(&self, tag: &str, timeout_ms: i64) -> Result<i64, String> {
+        let url = self.delay_url.lock().unwrap().clone();
         let path = format!(
             "/proxies/{}/delay?timeout={}&url={}",
             percent_encode_path(tag),
             timeout_ms,
-            percent_encode_query("https://www.gstatic.com/generate_204")
+            percent_encode_query(&url)
         );
         let url = format!("http://{}{}", self.addr, path);
         let resp = match self.http.get(&url).send().await {
@@ -161,7 +174,7 @@ impl Client {
         name
     }
 
-    #[allow(dead_code)]
+    /// 读策略组当前选中的成员名。
     pub async fn proxy_now(&self, group: &str) -> Result<String, String> {
         let path = format!("/proxies/{}", percent_encode_path(group));
         let p = self.get_json(&path).await?;
@@ -169,6 +182,69 @@ impl Client {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string())
+    }
+
+    /// 把 selector 策略组切到指定成员（带宽测速临时切换出口用）。
+    pub async fn select_proxy(&self, group: &str, name: &str) -> Result<(), String> {
+        let path = format!("/proxies/{}", percent_encode_path(group));
+        let url = format!("http://{}{}", self.addr, path);
+        let resp = self
+            .http
+            .put(&url)
+            .json(&json!({"name": name}))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if status != reqwest::StatusCode::OK && status != reqwest::StatusCode::NO_CONTENT {
+            let body = resp.bytes().await.unwrap_or_default();
+            let head = String::from_utf8_lossy(&body);
+            return Err(format!("select {group}→{name}: {}", head.chars().take(200).collect::<String>()));
+        }
+        Ok(())
+    }
+
+    /// 经指定 HTTP 代理下载测速文件，返回比特率（bps）。
+    /// 整体超时截断：截断前收到的字节数已足够算速率；一个字节都没收到才算失败。
+    pub async fn speed_probe(
+        &self,
+        proxy_addr: &str,
+        url: &str,
+        timeout: Duration,
+    ) -> Result<i64, String> {
+        // 代理挂在 ClientBuilder 上（reqwest 不支持按请求切代理），
+        // 每次测速各建一个短生命周期 client，互不串味。
+        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(6));
+        if !proxy_addr.is_empty() {
+            builder = builder.proxy(reqwest::Proxy::http(proxy_addr).map_err(|e| e.to_string())?);
+        }
+        let http = builder.build().map_err(|e| e.to_string())?;
+        let resp = http
+            .get(url)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("speed {url}: {}", status.as_u16()));
+        }
+        use futures_util::StreamExt;
+        let start = std::time::Instant::now();
+        let mut total: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(b) => total += b.len() as u64,
+                // 总超时触发时连接被掐断，属于预期截断，不算失败
+                Err(_) => break,
+            }
+        }
+        let elapsed = start.elapsed().as_secs_f64().max(0.05);
+        if total == 0 {
+            return Err("没有收到任何数据".into());
+        }
+        Ok((total as f64 * 8.0 / elapsed) as i64)
     }
 
     /// 转发 /connections：每 2 秒从 Clash REST 拉一次连接列表，裁剪后推给浏览器。

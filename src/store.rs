@@ -1,10 +1,12 @@
 // 数据目录的状态层：settings / subs / nodes / config / template / snapshots。
 // 所有落盘走 write_file_atomic（tmp → fsync → rename）。
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::engine;
@@ -27,6 +29,17 @@ struct StoreInner {
     settings: Settings,
     /// engine 决定 config/template 的文件名（JSON 还是 YAML）。
     engine: String,
+    /// 带宽测速结果（tag -> bps/时间戳），持久化到 speeds.json。
+    /// 与延迟缓存不同：带宽测速要临时切换出口、逐个串行跑，结果贵重，重启后保留。
+    speeds: HashMap<String, SpeedResult>,
+}
+
+/// 一个节点的最近一次带宽测速结果。bps < 0 表示测速失败（连不上/超时）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpeedResult {
+    pub bps: i64,
+    /// unix 秒
+    pub at: i64,
 }
 
 impl Store {
@@ -69,7 +82,20 @@ impl Store {
         if settings.mixed_listen.is_empty() {
             settings.mixed_listen = "127.0.0.1".into();
         }
+        if settings.urltest_interval_min <= 0 {
+            settings.urltest_interval_min = 10;
+        }
+        if settings.urltest_tolerance <= 0 {
+            settings.urltest_tolerance = 50;
+        }
+        if settings.speed_timeout_sec <= 0 {
+            settings.speed_timeout_sec = 10;
+        }
+        if settings.speed_test_url.is_empty() {
+            settings.speed_test_url = crate::model::DEFAULT_SPEED_TEST_URL.into();
+        }
         let subs: Vec<Subscription> = read_json_or_default(&dir.join("subs.json"));
+        let speeds: HashMap<String, SpeedResult> = read_json_or_default(&dir.join("speeds.json"));
 
         let s = Store {
             dir: dir.to_path_buf(),
@@ -77,6 +103,7 @@ impl Store {
                 subs,
                 settings,
                 engine: String::new(),
+                speeds,
             }),
             node_mu: std::sync::Mutex::new(()),
             snap_mu: std::sync::Mutex::new(()),
@@ -362,6 +389,35 @@ impl Store {
             }
         }
         Err("节点不存在".into())
+    }
+
+    /* ------------------------------------------------------------ speeds（带宽测速结果） */
+
+    /// 全部未过期的带宽测速结果（按 tag）。
+    pub fn speeds(&self) -> HashMap<String, SpeedResult> {
+        self.inner.read().unwrap().speeds.clone()
+    }
+
+    /// 记录一个节点的最近一次带宽测速结果并落盘。
+    pub fn set_speed(&self, tag: &str, bps: i64) {
+        let data;
+        {
+            let mut inner = self.inner.write().unwrap();
+            inner.speeds.insert(
+                tag.to_string(),
+                SpeedResult {
+                    bps,
+                    at: unix_now(),
+                },
+            );
+            data = match marshal_indent(&inner.speeds) {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+        }
+        if let Err(e) = write_file_atomic(&self.dir.join("speeds.json"), &data) {
+            eprintln!("save speeds.json: {e}");
+        }
     }
 
     /* ------------------------------------------------------------ config */

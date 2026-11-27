@@ -33,6 +33,13 @@ pub struct RenderOpts {
     pub clash_addr: String,
     /// 本机 53 端口策略：false=被占时回落 5335，true=保留 53（由应用/启动链路接管端口）
     pub dns53_takeover: bool,
+    /// urltest 自动选优：间隔（分钟）/ 容差（ms）/ 连通性测速 URL
+    pub urltest_interval_min: i64,
+    pub urltest_tolerance: i64,
+    pub delay_test_url: String,
+    /// interval = 内核定时全量测优；failover = 面板保活探测，内核侧把
+    /// 定时全测降到 24h 兜底一次（面板故障切换时会主动接管选路）
+    pub auto_select_mode: String,
 }
 
 pub const DEFAULT_CLASH_ADDR: &str = "127.0.0.1:9091";
@@ -54,6 +61,43 @@ impl RenderOpts {
             tproxy_port: set.tproxy_port,
             clash_addr: set.clash_addr.clone(),
             dns53_takeover: set.dns53_takeover,
+            urltest_interval_min: set.urltest_interval_min,
+            urltest_tolerance: set.urltest_tolerance,
+            delay_test_url: set.delay_test_url.clone(),
+            auto_select_mode: set.auto_select_mode.clone(),
+        }
+    }
+
+    /// failover（按需测优）模式：内核侧几乎不做定时全量测速，
+    /// 由面板探测当前节点、故障时全量重测并切换。
+    pub fn failover_mode(&self) -> bool {
+        self.auto_select_mode == "failover"
+    }
+
+    /// urltest 自动选优间隔（分钟），非法值回落 10。
+    pub fn urltest_interval(&self) -> i64 {
+        if self.urltest_interval_min > 0 {
+            self.urltest_interval_min
+        } else {
+            10
+        }
+    }
+
+    /// urltest 切换容差（ms），非法值回落 50。
+    pub fn urltest_tolerance(&self) -> i64 {
+        if self.urltest_tolerance > 0 {
+            self.urltest_tolerance
+        } else {
+            50
+        }
+    }
+
+    /// 连通性测速 URL，空值回落 gstatic generate_204。
+    pub fn delay_url(&self) -> &str {
+        if self.delay_test_url.trim().is_empty() {
+            crate::model::DEFAULT_DELAY_TEST_URL
+        } else {
+            self.delay_test_url.trim()
         }
     }
 
@@ -118,13 +162,19 @@ fn render_sing_box(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec<
         "outbounds": sel_members,
         "default": "auto"
     }));
+    // failover 模式下内核侧只留 24h 一次的兜底全测；日常保活与故障切换由面板负责
+    let interval = if opts.failover_mode() {
+        "24h".to_string()
+    } else {
+        format!("{}m", opts.urltest_interval())
+    };
     outbounds.push(json!({
         "type": "urltest",
         "tag": "auto",
         "outbounds": tags.iter().map(|t| json!(t)).collect::<Vec<_>>(),
-        "url": "https://www.gstatic.com/generate_204",
-        "interval": "10m",
-        "tolerance": 50
+        "url": opts.delay_url(),
+        "interval": interval,
+        "tolerance": opts.urltest_tolerance()
     }));
     for n in &enabled {
         let mut ob = n.outbound.clone();

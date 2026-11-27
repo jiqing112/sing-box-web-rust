@@ -1448,3 +1448,103 @@ a { color: inherit; text-decoration: none; }
   }
   .dialog, .palette { transform: none; }
 }
+
+/* ============================================================ 节点表：可排序列 + 速度单元格 */
+
+#nodeTable th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+#nodeTable th.sortable::after {
+  content: "\21C5";
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 10px;
+  color: var(--text-4);
+  transition: color 0.15s var(--ease);
+}
+#nodeTable th.sortable:hover { color: var(--text-2); }
+#nodeTable th.sortable.sort-on { color: var(--lime); }
+#nodeTable th.sortable.sort-on::after { color: var(--lime); content: "\2193"; }
+#nodeTable th.sortable.sort-on.sort-asc::after { content: "\2191"; }
+
+.lat.spd { min-width: 72px; display: inline-block; }
+
+/* ============================================================ 高对比分段选项（监听范围 / 向导） */
+
+.seg-opts {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--field);
+  border: 1px solid var(--line-2);
+  border-radius: 9px;
+}
+.seg-opts button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+.seg-opts button svg { color: var(--text-4); flex: none; transition: color 0.16s var(--ease); }
+.seg-opts button:hover { color: var(--text-2); background: var(--btn-hover); }
+.seg-opts button.on {
+  color: var(--lime);
+  font-weight: 560;
+  background: var(--lime-soft);
+  border-color: var(--lime-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.seg-opts button.on svg { color: var(--lime); }
+.seg-opts .o-t { display: inline-flex; flex-direction: column; align-items: flex-start; line-height: 1.25; }
+.seg-opts .o-t small { font-size: 10px; font-weight: 400; color: var(--text-4); }
+.seg-opts button.on .o-t small { color: var(--text-3); }
+.seg-opts.wz-fill { display: flex; width: 100%; }
+.seg-opts.wz-fill button { flex: 1; height: 40px; justify-content: center; }
+
+/* 弹窗里的两列栅格与选项副标题 */
+.cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.opt-sub { font-size: 11.5px; color: var(--text-4); margin-top: 3px; line-height: 1.5; }
+.hint.wz-ok { color: var(--lime); }
+
+/* ============================================================ 首次运行向导 */
+
+#wizardOverlay { z-index: 110; }
+.wizard {
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 60px);
+  overflow: auto;
+  background: var(--elevated);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-2);
+  transform: translateY(6px);
+  opacity: 0;
+  transition: transform 0.2s var(--ease), opacity 0.16s var(--ease);
+}
+#wizardOverlay.open .wizard { transform: none; opacity: 1; }
+.wizard-hd { display: flex; align-items: flex-start; gap: 12px; padding: 22px 24px 0; }
+.wizard-hd .brand-mark { width: 38px; height: 38px; border-radius: 11px; flex: none; margin-top: 1px; }
+.wz-title { flex: 1; min-width: 0; }
+.wizard-hd h3 { margin: 0; font-size: 17.5px; font-weight: 600; letter-spacing: -0.015em; }
+.wizard-hd p { margin: 5px 0 0; font-size: 12.5px; color: var(--text-3); line-height: 1.55; }
+.wizard-hd .btn { flex: none; }
+.wizard-dots { display: flex; gap: 14px; padding: 16px 24px 0; }
+.wz-dot { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-4); }
+.wz-dot i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); transition: 0.2s var(--ease); }
+.wz-dot.on { color: var(--lime); }
+.wz-dot.on i { background: var(--lime); box-shadow: 0 0 0 3px var(--lime-soft); }
+.wz-dot.done { color: var(--text-3); }
+.wz-dot.done i { background: var(--lime); }
+.wizard-bd { padding: 18px 24px; display: flex; flex-direction: column; gap: 12px; }
+.wizard-ft { padding: 14px 24px 20px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wz-sum { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.wz-sum .kv { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.wz-sum .kv:last-child { border-bottom: none; }
+.wz-sum .k { font-size: 12px; color: var(--text-3); }

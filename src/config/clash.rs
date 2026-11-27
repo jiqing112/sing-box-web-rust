@@ -52,6 +52,12 @@ pub fn render_clash(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec
     // 策略组名字与 sing-box 那套保持一致（proxy / auto）
     let mut select_members: Vec<Value> = vec![json!("auto"), json!("DIRECT")];
     select_members.extend(tags.iter().cloned());
+    // failover 模式：内核侧 24h 兜底全测一次，保活/切换由面板负责
+    let interval_sec = if opts.failover_mode() {
+        24 * 3600
+    } else {
+        opts.urltest_interval() * 60
+    };
     obj.insert(
         "proxy-groups".into(),
         json!([
@@ -59,9 +65,9 @@ pub fn render_clash(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec
             {
                 "name": "auto",
                 "type": "url-test",
-                "url": "https://www.gstatic.com/generate_204",
-                "interval": 600,
-                "tolerance": 50,
+                "url": opts.delay_url(),
+                "interval": interval_sec,
+                "tolerance": opts.urltest_tolerance(),
                 "proxies": tags
             }
         ]),

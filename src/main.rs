@@ -484,6 +484,7 @@ async fn run() -> i32 {
 
     let cl = Arc::new(clashclient::Client::new(&settings.clash_addr));
     cl.set_ttl(settings.delay_ttl);
+    cl.set_delay_url(&settings.delay_test_url);
 
     let tp = Arc::new(tproxy::new(
         &default_nft_path(),
@@ -655,6 +656,7 @@ async fn run() -> i32 {
     }
 
     app.start_scheduler();
+    app.start_failover_monitor();
 
     // 系统托盘（仅 Windows；-notray / 会话 0 SYSTEM 自启时自动跳过）。
     // 必须放在监听起来之后：托盘的 tooltip/菜单要展示真实端口。

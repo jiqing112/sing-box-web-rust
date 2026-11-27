@@ -63,6 +63,7 @@
     <div class="field"><label>密码</label><input class="input" id="loginPass" type="password" placeholder="••••••••" /></div>
     <div class="field" id="loginPass2Field" style="display:none"><label>确认密码</label><input class="input" id="loginPass2" type="password" placeholder="再输入一次" /></div>
     <button class="btn primary block" type="submit" id="loginBtn">登录</button>
+    <button class="btn ghost block" type="button" id="loginSkip" style="display:none">不设置密码，免密访问面板</button>
     <div class="login-err" id="loginErr"></div>
   </form>
 </div>
@@ -229,6 +230,8 @@
           <div class="page-head">
             <h1>节点</h1>
             <div class="page-actions">
+              <button class="btn icon-btn" id="speedCfgBtn" title="测速设置"><svg width="14" height="14"><use href="#i-settings"/></svg></button>
+              <button class="btn" id="speedAllBtn" title="逐节点测带宽（串行执行）"><svg width="13" height="13"><use href="#i-arrow-up"/></svg>带宽测速</button>
               <button class="btn" id="testAllBtn"><svg width="13" height="13"><use href="#i-zap"/></svg>全部测速</button>
               <button class="btn primary" data-goto="config"><svg width="13" height="13"><use href="#i-code"/></svg>生成配置</button>
             </div>
@@ -248,7 +251,12 @@
             </div>
             <div class="scroll-area">
               <table class="table" id="nodeTable">
-                <thead><tr><th>节点</th><th>协议</th><th>地址</th><th>延迟</th><th>启用</th><th class="t-right">操作</th></tr></thead>
+                <thead><tr>
+                  <th>节点</th><th>协议</th><th>地址</th>
+                  <th class="sortable" data-sort="delay" title="点击排序">延迟</th>
+                  <th class="sortable" data-sort="speed" title="点击排序">速度</th>
+                  <th>启用</th><th class="t-right">操作</th>
+                </tr></thead>
                 <tbody></tbody>
               </table>
             </div>
@@ -521,9 +529,9 @@
                   <div class="lp-mixed-row">
                     <div class="field w-108"><label>端口</label><input class="input" id="lpMixPort" type="number" min="1024" max="65535" /></div>
                     <div class="field"><label>监听范围</label>
-                      <div class="seg" id="lpMixListenSeg">
-                        <button type="button" data-listen="127.0.0.1" class="on">仅本机</button>
-                        <button type="button" data-listen="0.0.0.0">局域网</button>
+                      <div class="seg-opts" id="lpMixListenSeg">
+                        <button type="button" data-listen="127.0.0.1" class="on"><svg width="13" height="13"><use href="#i-cpu"/></svg><span class="o-t">仅本机<small>127.0.0.1</small></span></button>
+                        <button type="button" data-listen="0.0.0.0"><svg width="13" height="13"><use href="#i-lan"/></svg><span class="o-t">局域网<small>0.0.0.0 · 无鉴权需注意</small></span></button>
                       </div>
                     </div>
                     <button class="btn primary sm right-auto" id="lpMixSave">应用</button>
@@ -678,6 +686,7 @@
 </div>
 
 <div class="overlay" id="dialogOverlay"><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
+<div class="overlay" id="wizardOverlay"><div class="wizard" id="wizard" role="dialog" aria-modal="true"></div></div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script src="app.js"></script>

@@ -28,7 +28,7 @@ use crate::supervisor::Supervisor;
 use crate::tproxy;
 
 /// 面板版本。前端从 /status 读取。
-    pub const VERSION: &str = "1.4.0";
+    pub const VERSION: &str = "1.5.0";
 
 /// 覆盖「校验 + 重启 + 探活」全过程；mihomo 首次校验会下载 geo 数据。
 /// 最坏路径 90（校验）+ 8（重启）+ 25（探活）≈ 124s，超时会把 apply 半途
@@ -183,7 +183,14 @@ impl Server {
             .route("/api/v1/subscriptions/{id}/refresh", post(Self::h_refresh_sub))
             .route("/api/v1/nodes", get(Self::h_list_nodes))
             .route("/api/v1/nodes/delay", post(Self::h_delay_nodes))
+            .route("/api/v1/nodes/speed", post(Self::h_speed_nodes))
             .route("/api/v1/nodes/{id}", put(Self::h_toggle_node))
+            .route(
+                "/api/v1/settings/speedtest",
+                get(Self::h_speedtest_get).put(Self::h_speedtest_put),
+            )
+            .route("/api/v1/setup/finish", post(Self::h_setup_finish))
+            .route("/api/v1/setup/complete", post(Self::h_setup_complete))
             .route("/api/v1/config", get(Self::h_get_config))
             .route("/api/v1/config/render", post(Self::h_render_config))
             .route("/api/v1/config/validate", post(Self::h_validate_config))
@@ -372,8 +379,7 @@ impl Server {
     }
 
     /// 每分钟检查一次，按每个订阅自己的间隔重新拉取。
-    pub fn start_scheduler(self: &Arc<Self>) {
-        let app = self.clone();
+    pub fn start_scheduler(self: &Arc<Self>) {        let app = self.clone();
         tokio::spawn(async move {
             // 失败重试下限：订阅源故障时不至于每分钟重试、刷日志。
             const RETRY_FLOOR: Duration = Duration::from_secs(600);
@@ -404,11 +410,131 @@ impl Server {
                         Ok(n) => {
                             last_fail.remove(&sub.id);
                             eprintln!("自动更新 {} 完成，{n} 个节点", sub.name);
+                            // 更新后默认来一遍测速：新节点立即有延迟数据，
+                            // 失效节点按设置自动停用（在调度循环里直接跑，本身就是后台）
+                            app.test_sub_nodes_after_refresh(&sub).await;
                         }
                     }
                 }
             }
         });
+    }
+
+    /// failover（按需测优）模式的保活监控：平时只探测当前出口节点（30 秒一次、
+    /// 一个 204 请求），连续两次失败才全量重测启用节点并切到最快的那个。
+    /// 内核侧的定时全测在渲染时已降到 24h 兜底，日常工作由本任务承担。
+    pub fn start_failover_monitor(self: &Arc<Self>) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            const PROBE_EVERY: Duration = Duration::from_secs(30);
+            const FAIL_THRESHOLD: i32 = 2;
+            let mut fail_count: i32 = 0;
+            loop {
+                tokio::time::sleep(PROBE_EVERY).await;
+                if app.store.settings().auto_select_mode != "failover" || !app.sup.running() {
+                    continue;
+                }
+                // 当前真正承载流量的节点（顺着 selector → urltest 解析到底）
+                let active = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    app.clash.resolve_active("proxy"),
+                )
+                .await
+                .ok()
+                .unwrap_or_default();
+                if active.is_empty() || active == "DIRECT" {
+                    // DIRECT 是用户手动选的直连，不参与自动切换
+                    continue;
+                }
+                // 探测当前节点（结果顺带写进延迟缓存，UI 里就是实时的）
+                let ms = tokio::time::timeout(
+                    Duration::from_secs(6),
+                    app.clash.delay(&active, 5000),
+                )
+                .await
+                .unwrap_or(Err(String::new()))
+                .unwrap_or(-1);
+                if ms >= 0 {
+                    fail_count = 0;
+                    continue;
+                }
+                fail_count += 1;
+                if fail_count < FAIL_THRESHOLD {
+                    continue;
+                }
+                fail_count = 0;
+                // 当前节点挂了：全量重测，切到延迟最低的可用节点
+                let tags: Vec<String> = app
+                    .store
+                    .all_nodes()
+                    .iter()
+                    .filter(|n| n.enabled)
+                    .map(|n| n.tag.clone())
+                    .collect();
+                if tags.is_empty() {
+                    continue;
+                }
+                let measured = measure_delays(&app, tags).await;
+                let best = measured
+                    .iter()
+                    .filter(|(_, ms)| *ms >= 0)
+                    .min_by_key(|(_, ms)| *ms)
+                    .map(|(t, _)| t.clone());
+                match best {
+                    Some(best) if best != active => {
+                        if app.clash.select_proxy("proxy", &best).await.is_ok() {
+                            eprintln!("failover: 当前节点 {active} 故障，已切换到 {best}");
+                        } else {
+                            eprintln!("failover: 切换到 {best} 失败，保持 {active}");
+                        }
+                    }
+                    Some(_) => {} // 最快的仍是当前节点（探测抖动），保持不动
+                    None => eprintln!("failover: 当前节点 {active} 故障，全量测速无可用节点"),
+                }
+            }
+        });
+    }
+
+    /// 订阅刷新成功后默认来一遍延迟测速：实测该订阅全部启用节点（不走缓存，
+    /// 刷新的初衷就是拿到新节点清单，旧缓存可能已失真）。结果进延迟缓存供
+    /// UI 与 failover 使用；超时节点按「超时自动停用」设置处理。
+    /// 核心未运行时跳过；调用方负责放到后台，不阻塞 HTTP 响应/调度循环。
+    pub(crate) async fn test_sub_nodes_after_refresh(&self, sub: &Subscription) {
+        if !self.sup.running() {
+            return;
+        }
+        let tags: Vec<String> = match self.store.nodes(&sub.id) {
+            Ok(nodes) => nodes
+                .iter()
+                .filter(|n| n.enabled)
+                .map(|n| n.tag.clone())
+                .collect(),
+            Err(_) => return,
+        };
+        if tags.is_empty() {
+            return;
+        }
+        let measured = measure_delays(self, tags).await;
+        let ok = measured.iter().filter(|(_, ms)| *ms >= 0).count();
+        eprintln!(
+            "订阅 {} 更新后测速完成：{}/{} 个节点可用",
+            sub.name,
+            ok,
+            measured.len()
+        );
+        if self.store.settings().auto_disable_timeout {
+            let all = self.store.all_nodes();
+            for (tag, ms) in measured.iter() {
+                if *ms >= 0 {
+                    continue;
+                }
+                if let Some(n) = all.iter().find(|n| &n.tag == tag) {
+                    if n.enabled && self.store.set_node_enabled(&n.id, false).is_ok() {
+                        eprintln!("订阅 {} 更新后测速超时，已自动停用 {}", sub.name, tag);
+                    }
+                }
+            }
+        }
     }
 
     /// 后台准备 mihomo 的 geo 数据，不阻塞调用方。
@@ -474,10 +600,23 @@ impl Server {
             "needs_setup": app.needs_setup(),
             "username": set.username,
             "login_disabled": set.login_disabled,
+            "setup_done": set.setup_done,
+            "first_run": app.first_run(),
         }))
     }
 
+    /// 全新安装还没有任何使用痕迹（无订阅、无已下发配置）时视为首次运行，
+    /// 前端据此弹设置向导；老版本升级上来的实例不会被打扰。
+    pub(crate) fn first_run(&self) -> bool {
+        let set = self.store.settings();
+        if set.setup_done {
+            return false;
+        }
+        self.store.subscriptions().is_empty() && self.store.config().map(|c| c.is_empty()).unwrap_or(true)
+    }
+
     /// 首次账户设置：只在「还没有任何凭据」时可用。设置完成后即成为常规登录态。
+    /// body 里带 skip=true 表示「不设置密码」：登录保持关闭，面板免密访问。
     async fn h_auth_setup(State(app): State<Arc<Server>>, body: Bytes) -> Response {
         if !app.needs_setup() {
             return err_json(
@@ -490,6 +629,15 @@ impl Server {
             Ok(v) => v,
             Err(resp) => return resp,
         };
+        if inb.get("skip").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let mut set = app.store.settings();
+            set.login_disabled = true;
+            if let Err(e) = app.store.save_settings(set) {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+            }
+            eprintln!("首次设置选择了免密访问：面板登录保持关闭");
+            return json_ok(json!({"ok": true, "skipped": true}));
+        }
         let username = inb
             .get("username")
             .and_then(|v| v.as_str())
@@ -745,6 +893,9 @@ impl Server {
             "config_version": cfg_ver,
             "nodes": nodes.len(),
             "enabled": enabled,
+            // 未过期的延迟缓存：后台（订阅更新测速/failover 探测）跑完后
+            // 前端轮询这里就能立即看到，不必等用户手动测速
+            "delays": app.clash.delays_json(),
             "rules": rules,
             "rss": crate::platform::proc_rss(pid),
             "panel_rss": crate::platform::self_rss(),
@@ -1074,6 +1225,12 @@ impl Server {
                 }
             }
         }
+        // 新订阅入库后也默认测一遍（核心未运行时自动跳过），后台执行
+        let app2 = app.clone();
+        let sub2 = sub.clone();
+        tokio::spawn(async move {
+            app2.test_sub_nodes_after_refresh(&sub2).await;
+        });
         json_ok(json!({"subscription": sub, "nodes": nodes.len(), "core_autostart": core_autostart}))
     }
 
@@ -1153,6 +1310,12 @@ impl Server {
             Err(e) => return err_json(StatusCode::BAD_GATEWAY, "fetch_failed", &e),
         };
         let sub = app.store.subscription(&id).unwrap_or(sub);
+        // 更新后默认来一遍测速：丢到后台跑，HTTP 响应不被测速拖住
+        let app2 = app.clone();
+        let sub2 = sub.clone();
+        tokio::spawn(async move {
+            app2.test_sub_nodes_after_refresh(&sub2).await;
+        });
         json_ok(json!({"subscription": sub, "nodes": n}))
     }
 
@@ -1166,6 +1329,7 @@ impl Server {
         json_ok(json!({
             "nodes": nodes,
             "delays": app.clash.delays_json(),
+            "speeds": store_speeds_json(&app),
             "running": app.sup.running(),
         }))
     }
@@ -1215,40 +1379,12 @@ impl Server {
             }
             (cached, todo)
         };
-        let mut workers = app.store.settings().delay_workers;
-        if workers <= 0 {
-            workers = 3;
-        }
-        if workers > 16 {
-            workers = 16;
-        }
-        if workers as usize > todo.len() {
-            workers = todo.len() as i64;
-        }
-
-        // 固定 worker 并发（buffered 保持输入顺序），避免大订阅瞬间起上千协程
-        use futures_util::StreamExt;
-        let clash = app.clash.clone();
-        let n = workers as usize;
-        let measured: Vec<(String, i64)> = futures_util::stream::iter(todo.into_iter())
-            .map(|tag| {
-                let clash = clash.clone();
-                async move {
-                    let ms = tokio::time::timeout(Duration::from_secs(6), clash.delay(&tag, 5000))
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .unwrap_or(-1);
-                    (tag, ms)
-                }
-            })
-            .buffered(n.max(1))
-            .collect()
-            .await;
+        let measured = measure_delays(&app, todo).await;
         // 结果按请求里的节点顺序拼回去：缓存命中的 + 本次实测的。
         let measured_count = measured.len();
         let cached_count = cached.len();
-        let mut merged: std::collections::HashMap<String, i64> = measured.into_iter().collect();
+        let mut merged: std::collections::HashMap<String, i64> =
+            measured.iter().cloned().collect();
         for (tag, ms) in cached {
             merged.entry(tag).or_insert(ms);
         }
@@ -1260,12 +1396,463 @@ impl Server {
             .into_iter()
             .map(|(tag, ms)| json!({"tag": tag, "ms": ms}))
             .collect();
+
+        // 超时自动停用：只对本次实测超时（非缓存）的节点生效，
+        // 避免缓存里的历史失败反复触发。停用只改节点库，下次生成配置时生效。
+        let mut disabled: Vec<String> = Vec::new();
+        if app.store.settings().auto_disable_timeout {
+            let all = app.store.all_nodes();
+            for (tag, ms) in measured.iter() {
+                if *ms >= 0 {
+                    continue;
+                }
+                if let Some(n) = all.iter().find(|n| &n.tag == tag) {
+                    if n.enabled && app.store.set_node_enabled(&n.id, false).is_ok() {
+                        disabled.push(tag.clone());
+                    }
+                }
+            }
+            if !disabled.is_empty() {
+                eprintln!("测速超时自动停用 {} 个节点: {}", disabled.len(), disabled.join(", "));
+            }
+        }
+
         json_ok(json!({
             "results": arr,
             "delays": app.clash.delays_json(),
             "measured": measured_count,
             "cached": cached_count,
+            "disabled": disabled,
         }))
+    }
+
+    /* ------------------------------------------------------------ 带宽测速 */
+
+    /// 逐节点测带宽：临时把 proxy 组切到目标节点，经本机 mixed 入站下载测速文件，
+    /// 测完恢复原选择。必须串行——selector 是全局的，并发切换会互相干扰，
+    /// 测出来的速率也不可信。结果持久化到 speeds.json，作为「上次测速速度」展示。
+    async fn h_speed_nodes(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        static SPEED_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        use std::sync::atomic::Ordering;
+        if SPEED_BUSY
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return err_json(StatusCode::CONFLICT, "speed_busy", "已有带宽测速正在进行，请稍候");
+        }
+        let inb: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let tags_in: Vec<String> = inb
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let out = Self::speed_test_impl(&app, tags_in).await;
+        SPEED_BUSY.store(false, Ordering::SeqCst);
+        match out {
+            Ok(v) => json_ok(v),
+            Err((code, kind, msg)) => err_json(code, kind, &msg),
+        }
+    }
+
+    async fn speed_test_impl(
+        app: &Arc<Server>,
+        tags_in: Vec<String>,
+    ) -> Result<Value, (StatusCode, &'static str, String)> {
+        if !app.sup.running() {
+            return Err((
+                StatusCode::CONFLICT,
+                "core_stopped",
+                format!("{} 未运行，无法测速", engine::label(&app.engine_name())),
+            ));
+        }
+        let set = app.store.settings();
+        let mixed_port = if set.mixed_port > 0 { set.mixed_port } else { 7890 };
+        let url = if set.speed_test_url.trim().is_empty() {
+            crate::model::DEFAULT_SPEED_TEST_URL.to_string()
+        } else {
+            set.speed_test_url.trim().to_string()
+        };
+        let timeout_sec = set.speed_timeout_sec.clamp(3, 60).max(1);
+        let Ok(tags) = normalize_delay_tags(tags_in, &app.store.all_nodes()) else {
+            return Err((StatusCode::BAD_REQUEST, "no_tags", "没有可测速的节点".into()));
+        };
+        let group = "proxy";
+        let original = app
+            .clash
+            .proxy_now(group)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, "clash_error", format!("读取当前出口失败：{e}")))?;
+
+        let mut results: Vec<Value> = Vec::with_capacity(tags.len());
+        for tag in tags.iter() {
+            let switched = app.clash.select_proxy(group, tag).await.is_ok();
+            let bps = if switched {
+                let proxy = format!("http://127.0.0.1:{mixed_port}");
+                match app
+                    .clash
+                    .speed_probe(&proxy, &url, Duration::from_secs(timeout_sec as u64))
+                    .await
+                {
+                    Ok(b) => {
+                        app.store.set_speed(tag, b);
+                        b
+                    }
+                    Err(_) => {
+                        app.store.set_speed(tag, -1);
+                        -1
+                    }
+                }
+            } else {
+                // 节点不在策略组里（未启用）或内核拒绝切换
+                app.store.set_speed(tag, -1);
+                -1
+            };
+            results.push(json!({"tag": tag, "bps": bps}));
+        }
+        // 恢复原选择；原成员已失效（如刚被自动停用）时兜底切回 auto
+        if app.clash.select_proxy(group, &original).await.is_err() && original != "auto" {
+            let _ = app.clash.select_proxy(group, "auto").await;
+        }
+        Ok(json!({
+            "results": results,
+            "speeds": store_speeds_json(app),
+        }))
+    }
+
+    /* ------------------------------------------------------------ 测速设置 */
+
+    async fn h_speedtest_get(State(app): State<Arc<Server>>, headers: HeaderMap) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let set = app.store.settings();
+        json_ok(json!({
+            "auto_select_mode": if set.auto_select_mode == "failover" { "failover" } else { "interval" },
+            "urltest_interval_min": if set.urltest_interval_min > 0 { set.urltest_interval_min } else { 10 },
+            "urltest_tolerance": if set.urltest_tolerance > 0 { set.urltest_tolerance } else { 50 },
+            "delay_test_url": if set.delay_test_url.trim().is_empty() { crate::model::DEFAULT_DELAY_TEST_URL } else { set.delay_test_url.trim() },
+            "speed_test_url": if set.speed_test_url.trim().is_empty() { crate::model::DEFAULT_SPEED_TEST_URL } else { set.speed_test_url.trim() },
+            "speed_timeout_sec": if set.speed_timeout_sec > 0 { set.speed_timeout_sec } else { 10 },
+            "auto_disable_timeout": set.auto_disable_timeout,
+            "delay_workers": set.delay_workers,
+        }))
+    }
+
+    /// 保存测速设置。涉及内核策略组的字段（间隔/容差/延迟测速 URL）
+    /// 变更时自动重新渲染并下发配置，失败回滚设置。
+    async fn h_speedtest_put(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let inb: Value = match parse_body(&body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        let get_i = |k: &str| -> i64 {
+            inb.get(k)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+                .unwrap_or(0)
+        };
+        let get_url = |k: &str| -> String {
+            inb.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        for k in ["delay_test_url", "speed_test_url"] {
+            let u = get_url(k);
+            if !u.is_empty() && !u.starts_with("http://") && !u.starts_with("https://") {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "bad_url",
+                    &format!("{k} 必须是 http:// 或 https:// 开头的地址"),
+                );
+            }
+        }
+
+        let set = app.store.settings();
+        let prev = set.clone();
+        let mut s2 = set;
+        // 数值字段只在请求里真的带了（>0）才覆盖：部分更新不会把缺省字段
+        // 意外压成下限值
+        let itv = get_i("urltest_interval_min");
+        if itv > 0 {
+            s2.urltest_interval_min = itv.clamp(1, 1440);
+        }
+        let tol = get_i("urltest_tolerance");
+        if tol > 0 {
+            s2.urltest_tolerance = tol.clamp(1, 1000);
+        }
+        let sto = get_i("speed_timeout_sec");
+        if sto > 0 {
+            s2.speed_timeout_sec = sto.clamp(3, 60);
+        }
+        if let Some(b) = inb.get("auto_disable_timeout").and_then(|v| v.as_bool()) {
+            s2.auto_disable_timeout = b;
+        }
+        if inb.get("delay_test_url").is_some() {
+            s2.delay_test_url = get_url("delay_test_url");
+        }
+        if inb.get("speed_test_url").is_some() {
+            s2.speed_test_url = get_url("speed_test_url");
+        }
+        let w = get_i("delay_workers");
+        if w > 0 {
+            s2.delay_workers = w.clamp(1, 16);
+        }
+        if let Some(m) = inb.get("auto_select_mode").and_then(|v| v.as_str()) {
+            if m != "interval" && m != "failover" {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "bad_mode",
+                    "自动选优方式只能是 interval / failover",
+                );
+            }
+            s2.auto_select_mode = m.to_string();
+        }
+
+        let kernel_changed = s2.urltest_interval_min != prev.urltest_interval_min
+            || s2.urltest_tolerance != prev.urltest_tolerance
+            || s2.delay_test_url != prev.delay_test_url
+            || s2.auto_select_mode != prev.auto_select_mode;
+
+        let mut applied = false;
+        if kernel_changed {
+            // 与引擎切换互斥，避免渲染到一半内核被换掉
+            let _engine_g = app.engine_mu.lock().await;
+            let raw = match app.render_config(&s2).await {
+                Ok(r) => r,
+                Err(e) => return err_json(StatusCode::BAD_REQUEST, "render_failed", &e),
+            };
+            if let Err(e) = app.store.save_settings(s2.clone()) {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+            }
+            let apply_res =
+                tokio::time::timeout(APPLY_TIMEOUT, app.applier.apply(&raw, "测速设置变更")).await;
+            match apply_res {
+                Err(_) | Ok(Err(_)) => {
+                    let _ = app.store.save_settings(prev);
+                    app.failsafe_network().await;
+                    let msg = match apply_res {
+                        Ok(Err(e)) => e.to_string(),
+                        _ => "apply timeout".to_string(),
+                    };
+                    return err_json(StatusCode::BAD_REQUEST, "apply_failed", &msg);
+                }
+                Ok(Ok(())) => {}
+            }
+            app.clear_exit_ip().await;
+            applied = true;
+        } else if let Err(e) = app.store.save_settings(s2.clone()) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+        }
+        app.clash.set_delay_url(&s2.delay_test_url);
+        json_ok(json!({
+            "ok": true,
+            "applied": applied,
+            "settings": {
+                "urltest_interval_min": s2.urltest_interval_min,
+                "urltest_tolerance": s2.urltest_tolerance,
+                "delay_test_url": if s2.delay_test_url.is_empty() { crate::model::DEFAULT_DELAY_TEST_URL } else { s2.delay_test_url.as_str() },
+                "speed_test_url": if s2.speed_test_url.is_empty() { crate::model::DEFAULT_SPEED_TEST_URL } else { s2.speed_test_url.as_str() },
+                "speed_timeout_sec": s2.speed_timeout_sec,
+                "auto_disable_timeout": s2.auto_disable_timeout,
+                "delay_workers": s2.delay_workers,
+            }
+        }))
+    }
+
+    /* ------------------------------------------------------------ 首次运行向导 */
+
+    /// 向导一键完成：本机端口/监听 + 路由模式 + 局域网代理 + 系统代理，
+    /// 一次渲染一次 apply；还没有可启用节点时只落盘设置并标记完成。
+    async fn h_setup_finish(
+        State(app): State<Arc<Server>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let inb: Value = match parse_body(&body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        let get_str = |k: &str| inb.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let get_i = |k: &str| -> i64 {
+            inb.get(k)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0)
+        };
+
+        let reserved: HashMap<i64, &str> = HashMap::from([
+            (9090, "面板"),
+            (9091, "Clash API"),
+            (12345, "透明代理"),
+            (5354, "局域网 DNS"),
+            (53, "DNS"),
+        ]);
+        let check_port = |p: i64, what: &str| -> Result<(), Response> {
+            if !(1024..=65535).contains(&p) {
+                return Err(err_json(
+                    StatusCode::BAD_REQUEST,
+                    "bad_port",
+                    &format!("{what}端口需在 1024-65535 之间"),
+                ));
+            }
+            if let Some(name) = reserved.get(&p) {
+                return Err(err_json(
+                    StatusCode::BAD_REQUEST,
+                    "port_conflict",
+                    &format!("端口 {p} 已被{name}占用"),
+                ));
+            }
+            Ok(())
+        };
+
+        let set = app.store.settings();
+        let prev = set.clone();
+        let mut s2 = set;
+
+        let mixed_port = get_i("mixed_port");
+        if mixed_port > 0 {
+            if let Err(resp) = check_port(mixed_port, "本机代理") {
+                return resp;
+            }
+            s2.mixed_port = mixed_port;
+        }
+        let mixed_listen = get_str("mixed_listen");
+        if !mixed_listen.is_empty() {
+            if !matches!(mixed_listen.as_str(), "127.0.0.1" | "::1" | "0.0.0.0" | "::") {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "bad_listen",
+                    "监听地址只能是 127.0.0.1、::1、0.0.0.0 或 ::",
+                );
+            }
+            s2.mixed_listen = mixed_listen;
+        }
+        let routing = get_str("routing_mode");
+        if matches!(routing.as_str(), "rule" | "global" | "direct") {
+            s2.routing_mode = routing;
+        }
+        let lan_proxy = inb.get("lan_proxy").and_then(|v| v.as_bool()).unwrap_or(false);
+        let socks_port = get_i("lan_socks_port");
+        let http_port = get_i("lan_http_port");
+        if socks_port > 0 {
+            if let Err(resp) = check_port(socks_port, "SOCKS5") {
+                return resp;
+            }
+            s2.lan_socks_port = socks_port;
+        }
+        if http_port > 0 {
+            if let Err(resp) = check_port(http_port, "HTTP") {
+                return resp;
+            }
+            s2.lan_http_port = http_port;
+        }
+        if lan_proxy {
+            if s2.lan_socks_port == s2.lan_http_port {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "port_conflict",
+                    "SOCKS5 与 HTTP 端口不能相同",
+                );
+            }
+            if s2.lan_socks_port == s2.mixed_port || s2.lan_http_port == s2.mixed_port {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "port_conflict",
+                    "端口已被 mixed 入站占用",
+                );
+            }
+        }
+        s2.lan_proxy = lan_proxy;
+        s2.lan_user = get_str("lan_user");
+        s2.lan_pass = get_str("lan_pass");
+        if lan_proxy {
+            // 与局域网代理页同一条规则：都留空 = 开放代理；要鉴权就两项都填
+            if s2.lan_user.is_empty() != s2.lan_pass.is_empty() {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "bad_creds",
+                    "用户名和密码必须同时填写，或同时留空（留空=不鉴权）",
+                );
+            }
+            if !s2.lan_user.is_empty() && s2.lan_pass.len() < 8 {
+                return err_json(StatusCode::BAD_REQUEST, "weak_password", "密码至少 8 位");
+            }
+        }
+        s2.setup_done = true;
+
+        // 没有任何启用节点时渲染会失败（"没有启用的节点"）：设置照常落盘，
+        // 标记向导完成，等用户在节点页启用后点「生成配置」。
+        let raw = match app.render_config(&s2).await {
+            Ok(r) => r,
+            Err(e) => {
+                if let Err(se) = app.store.save_settings(s2) {
+                    return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &se.to_string());
+                }
+                return json_ok(json!({"ok": true, "applied": false, "reason": e}));
+            }
+        };
+        if let Err(e) = app.store.save_settings(s2.clone()) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+        }
+        let apply_res = tokio::time::timeout(
+            APPLY_TIMEOUT,
+            app.applier.apply(&raw, "首次运行向导"),
+        )
+        .await;
+        match apply_res {
+            Err(_) | Ok(Err(_)) => {
+                let _ = app.store.save_settings(prev);
+                app.failsafe_network().await;
+                let msg = match apply_res {
+                    Ok(Err(e)) => e.to_string(),
+                    _ => "apply timeout".to_string(),
+                };
+                return err_json(StatusCode::BAD_REQUEST, "apply_failed", &msg);
+            }
+            Ok(Ok(())) => {}
+        }
+        app.clear_exit_ip().await;
+        if inb.get("sysproxy").and_then(|v| v.as_bool()).unwrap_or(false) && cfg!(windows) {
+            let port = if s2.mixed_port > 0 { s2.mixed_port as u16 } else { 7890 };
+            if let Err(e) = crate::sysproxy::set_enabled(true, port, app.store.dir()) {
+                eprintln!("设置系统代理失败: {e}");
+            }
+        }
+        json_ok(json!({"ok": true, "applied": true}))
+    }
+
+    /// 只标记向导完成（用户点了「跳过向导」）。
+    async fn h_setup_complete(State(app): State<Arc<Server>>, headers: HeaderMap) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let mut set = app.store.settings();
+        set.setup_done = true;
+        if let Err(e) = app.store.save_settings(set) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+        }
+        json_ok(json!({"ok": true}))
     }
 
     async fn h_toggle_node(
@@ -1547,6 +2134,50 @@ pub(crate) fn validate_listen_addr(addr: &str) -> Result<(), String> {
         Ok(p) if p >= 1 => Ok(()),
         _ => Err("端口必须在 1-65535 之间".into()),
     }
+}
+
+/// store 里的带宽测速结果转成 API JSON：{tag: {bps, at}}。
+fn store_speeds_json(app: &Server) -> Value {
+    let mut out = serde_json::Map::new();
+    for (tag, r) in app.store.speeds() {
+        out.insert(tag, json!({"bps": r.bps, "at": r.at}));
+    }
+    Value::Object(out)
+}
+
+/// 全量实测一批节点的延迟（不走缓存），并发数取设置里的延迟测速并发。
+/// 手动测速接口、failover 监控与订阅更新后的自动测速共用：
+/// 结果写进 clashclient 的内存延迟缓存。
+async fn measure_delays(app: &Server, tags: Vec<String>) -> Vec<(String, i64)> {
+    let mut workers = app.store.settings().delay_workers;
+    if workers <= 0 {
+        workers = 3;
+    }
+    if workers > 16 {
+        workers = 16;
+    }
+    if workers as usize > tags.len() {
+        workers = tags.len() as i64;
+    }
+    // 固定 worker 并发（buffered 保持输入顺序），避免大订阅瞬间起上千协程
+    use futures_util::StreamExt;
+    let clash = app.clash.clone();
+    let n = workers as usize;
+    futures_util::stream::iter(tags.into_iter())
+        .map(|tag| {
+            let clash = clash.clone();
+            async move {
+                let ms = tokio::time::timeout(Duration::from_secs(6), clash.delay(&tag, 5000))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(-1);
+                (tag, ms)
+            }
+        })
+        .buffered(n.max(1))
+        .collect()
+        .await
 }
 
 /// 去空白、去重并按上限截断；空列表时取全部启用节点。

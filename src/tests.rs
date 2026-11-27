@@ -86,6 +86,40 @@ proxies:
     }
 
     #[test]
+    fn render_urltest_uses_settings() {
+        let tpl = crate::store::default_template();
+        let nodes = vec![node(
+            "n1",
+            json!({"type":"ss","server":"1.2.3.4","server_port":8388,"method":"aes-128-gcm","password":"p"}),
+        )];
+        let mut o = opts("sing-box");
+        o.urltest_interval_min = 5;
+        o.urltest_tolerance = 80;
+        o.delay_test_url = "https://example.com/204".into();
+        let cfg: Value =
+            serde_json::from_slice(&crate::config::render(tpl.clone(), &nodes, &o).unwrap())
+                .unwrap();
+        let auto = cfg["outbounds"].as_array().unwrap().get(1).unwrap().clone();
+        assert_eq!(auto["interval"], "5m");
+        assert_eq!(auto["tolerance"], 80);
+        assert_eq!(auto["url"], "https://example.com/204");
+
+        // mihomo：分钟 → 秒
+        let tpl_m: Value = serde_yaml::from_str(crate::store::default_clash_template()).unwrap();
+        let mut om = opts("mihomo");
+        om.urltest_interval_min = 5;
+        let cfg_m: Value =
+            serde_yaml::from_slice(&crate::config::render(tpl_m, &nodes, &om).unwrap()).unwrap();
+        let auto_m = cfg_m["proxy-groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "auto")
+            .unwrap();
+        assert_eq!(auto_m["interval"], 300);
+    }
+
+    #[test]
     fn render_sing_box_groups_and_rule_set_outbound() {
         let tpl = crate::store::default_template();
         let nodes = vec![

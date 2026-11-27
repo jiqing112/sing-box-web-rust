@@ -6,6 +6,12 @@ use serde_json::{Map, Value};
 
 pub const RULE_SET_DETOUR_TAG: &str = "rule-set";
 
+/// 连通性测速（延迟）URL 缺省值：204 探测，只测连通与 RTT。
+pub const DEFAULT_DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
+/// 带宽测速 URL 缺省值：Cloudflare 下行 10MB，按实际收到字节数算速率。
+pub const DEFAULT_SPEED_TEST_URL: &str =
+    "https://speed.cloudflare.com/__down?bytes=10485760";
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,
@@ -132,6 +138,37 @@ pub struct Settings {
     pub last_check_ok: bool,
     #[serde(default)]
     pub lan_if: String,
+
+    /* ---------- 测速与自动选优（内核 urltest 组 + 面板手动测速） ---------- */
+    /// 内核 urltest 组的自动测优间隔（分钟）；0 = 旧数据未设置，按 10 分钟处理
+    #[serde(default, deserialize_with = "crate::util::null_default::deserialize")]
+    pub urltest_interval_min: i64,
+    /// 自动切换容差（ms）：新节点要快这么多才切换，防止来回抖动
+    #[serde(default, deserialize_with = "crate::util::null_default::deserialize")]
+    pub urltest_tolerance: i64,
+    /// 连通性测速（延迟）URL；空 = gstatic generate_204
+    #[serde(default)]
+    pub delay_test_url: String,
+    /// 带宽测速下载 URL；空 = cloudflare __down 10MB
+    #[serde(default)]
+    pub speed_test_url: String,
+    /// 单节点带宽测速的最长时长（秒）
+    #[serde(default, deserialize_with = "crate::util::null_default::deserialize")]
+    pub speed_timeout_sec: i64,
+    /// 延迟超时的节点自动停用（新字段缺席视为开启）
+    #[serde(default = "default_true")]
+    pub auto_disable_timeout: bool,
+    /// 自动选优方式：interval = 内核定时全量测优（默认）；
+    /// failover = 平时只探测当前节点，故障时才全量测速并切换（面板接管选路）
+    #[serde(default)]
+    pub auto_select_mode: String,
+    /// 首次运行向导已完成（完成后不再弹引导）
+    #[serde(default)]
+    pub setup_done: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -167,6 +204,14 @@ impl Default for Settings {
             last_check_at: "".into(),
             last_check_ok: false,
             lan_if: "".into(),
+            urltest_interval_min: 10,
+            urltest_tolerance: 50,
+            delay_test_url: String::new(),
+            speed_test_url: String::new(),
+            speed_timeout_sec: 10,
+            auto_disable_timeout: true,
+            auto_select_mode: String::new(),
+            setup_done: false,
         }
     }
 }
