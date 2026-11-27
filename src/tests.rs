@@ -112,12 +112,27 @@ proxies:
                 &crate::config::render(tpl.clone(), &nodes, &om).unwrap(),
             )
             .unwrap();
-            assert_eq!(
-                cfg_m["outbounds"].as_array().unwrap().get(1).unwrap()["interval"],
-                "24h",
-                "mode={mode}"
-            );
+            let auto_m = cfg_m["outbounds"].as_array().unwrap().get(1).unwrap();
+            assert_eq!(auto_m["interval"], "24h", "mode={mode}");
+            // sing-box 1.14 校验 interval ≤ idle_timeout（默认 30m），必须同步放大
+            assert_eq!(auto_m["idle_timeout"], "24h", "mode={mode}");
         }
+
+        // interval 模式：间隔 > 30 分钟时同样要放大 idle_timeout；不超过则不写
+        let mut oi = opts("sing-box");
+        oi.urltest_interval_min = 60;
+        let cfg_i: Value =
+            serde_json::from_slice(&crate::config::render(tpl.clone(), &nodes, &oi).unwrap())
+                .unwrap();
+        let auto_i = cfg_i["outbounds"].as_array().unwrap().get(1).unwrap();
+        assert_eq!(auto_i["interval"], "60m");
+        assert_eq!(auto_i["idle_timeout"], "60m");
+        let mut os = opts("sing-box");
+        os.urltest_interval_min = 10;
+        let cfg_s: Value =
+            serde_json::from_slice(&crate::config::render(tpl, &nodes, &os).unwrap()).unwrap();
+        let auto_s = cfg_s["outbounds"].as_array().unwrap().get(1).unwrap();
+        assert!(auto_s.get("idle_timeout").is_none());
 
         // mihomo：分钟 → 秒
         let tpl_m: Value = serde_yaml::from_str(crate::store::default_clash_template()).unwrap();

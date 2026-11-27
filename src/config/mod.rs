@@ -168,14 +168,21 @@ fn render_sing_box(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec<
     } else {
         format!("{}m", opts.urltest_interval())
     };
-    outbounds.push(json!({
+    let mut auto = json!({
         "type": "urltest",
         "tag": "auto",
         "outbounds": tags.iter().map(|t| json!(t)).collect::<Vec<_>>(),
         "url": opts.delay_url(),
         "interval": interval,
         "tolerance": opts.urltest_tolerance()
-    }));
+    });
+    // sing-box 1.14 校验 urltest 的 interval ≤ idle_timeout（内核默认 30m）：
+    // 间隔超过 30 分钟（面板接管的 24h 兜底、或用户把间隔调大）时必须
+    // 同步放大 idle_timeout，否则核心启动即 FATAL。
+    if opts.panel_managed() || opts.urltest_interval() > 30 {
+        auto["idle_timeout"] = json!(interval);
+    }
+    outbounds.push(auto);
     for n in &enabled {
         let mut ob = n.outbound.clone();
         // 老版本把 ss:// 的 scheme 直接存成 type=ss，sing-box 不认；
