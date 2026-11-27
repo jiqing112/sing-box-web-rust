@@ -905,7 +905,7 @@ function renderNodes() {
   const rows = sortNodeRows(filteredNodes());
   const tbody = $('#nodeTable tbody');
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-cell">
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">
       ${state.nodes.length ? '没有匹配的节点' : '还没有节点，先去「订阅」页添加订阅'}</td></tr>`;
   } else {
     tbody.innerHTML = rows.map((n) => {
@@ -925,17 +925,11 @@ function renderNodes() {
         <td><span class="lat ${c}">${latText(ms)}</span></td>
         <td><span class="lat spd ${sc}" ${sp && sp.at ? `title="${esc(agoText(sp.at))}"` : ''}>${spdText(bps)}</span></td>
         <td><button class="switch sm ${n.enabled ? 'on' : ''}" data-toggle="${n.id}" role="switch" aria-checked="${!!n.enabled}"></button></td>
-        <td class="t-right">
-          <button class="btn ghost xs" data-ping="${esc(n.tag)}">测速</button>
-          <button class="btn ghost xs" data-speed="${esc(n.tag)}">带宽</button>
-        </td>
       </tr>`;
     }).join('');
   }
 
   $$('[data-toggle]').forEach((b) => (b.onclick = () => toggleNode(b.dataset.toggle, b)));
-  $$('[data-ping]').forEach((b) => (b.onclick = () => testOne(b.dataset.ping)));
-  $$('[data-speed]').forEach((b) => (b.onclick = () => speedOne(b.dataset.speed)));
 
   const enabled = state.nodes.filter((n) => n.enabled).length;
   $('#nodeFoot').textContent = `显示 ${rows.length} 个节点 · 已启用 ${enabled} 个`;
@@ -954,18 +948,6 @@ async function toggleNode(id, btn) {
     await pollStatus();
   } catch (e) {
     toast('err', '操作失败', e.message);
-  }
-}
-
-async function testOne(tag) {
-  if (!state.status?.running) { toast('err', '核心未运行', `先到服务页启动 ${eng()}`); return; }
-  try {
-    // 单点测速是显式动作，永远实测，不吃缓存。
-    const d = await api('/api/v1/nodes/delay', { method: 'POST', body: JSON.stringify({ tags: [tag], refresh: true }) });
-    state.delays = d.delays;
-    renderNodes(); renderDashNodes(); renderStatus();
-  } catch (e) {
-    toast('err', '测速失败', e.message);
   }
 }
 
@@ -1000,11 +982,6 @@ async function testAll() {
 }
 
 /* ------------------------------------------------------------ 带宽测速 */
-
-async function speedOne(tag) {
-  if (!state.status?.running) { toast('err', '核心未运行', `先到服务页启动 ${eng()}`); return; }
-  await runSpeedTest([tag]);
-}
 
 async function speedAll() {
   if (state.speedRunning) return;
@@ -1110,10 +1087,15 @@ async function openSpeedCfg() {
     try {
       const r = await api('/api/v1/settings/speedtest', { method: 'PUT', body: JSON.stringify(body) });
       closeDialog(true);
-      toast('ok', '测速设置已保存',
-        r.applied
-          ? (body.auto_select_mode === 'failover' ? '已切换为故障才切换模式，配置已下发内核' : 'auto 策略组已更新并下发到内核')
-          : '非内核项已生效，内核项下次生成配置时生效');
+      if (r.applied) {
+        toast('ok', '测速设置已保存',
+          body.auto_select_mode === 'failover' ? '已切换为故障才切换模式，配置已下发内核' : 'auto 策略组已更新并下发到内核');
+      } else if (r.reason) {
+        // 典型：还没有启用的节点。设置已保存，等启用节点后生成配置生效
+        toast('info', '测速设置已保存', `${r.reason}；启用节点后点「生成配置」即生效`);
+      } else {
+        toast('ok', '测速设置已保存', '非内核项已生效，内核项下次生成配置时生效');
+      }
       if (r.settings?.delay_workers) $('#workersChip').textContent = `并发上限 ${r.settings.delay_workers}`;
     } catch (e) {
       toast('err', '保存失败', e.message);

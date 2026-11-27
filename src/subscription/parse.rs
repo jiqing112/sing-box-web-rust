@@ -12,13 +12,9 @@ use crate::model::{normalize_outbound_type, Node};
 pub fn parse(
     body: &[u8],
     sub_id: &str,
-    prev: &[Node],
+    _prev: &[Node],
     reserved: &mut HashSet<String>,
 ) -> Result<Vec<Node>, String> {
-    let mut prev_enabled: HashMap<String, bool> = HashMap::new();
-    for n in prev {
-        prev_enabled.insert(n.id.clone(), n.enabled);
-    }
 
     let text = String::from_utf8_lossy(body);
     let nodes = if text.contains("proxies:") {
@@ -50,7 +46,10 @@ pub fn parse(
         reserved.insert(tag.clone());
         n.tag = tag.clone();
         n.id = node_id(sub_id, &n.tag, &n.server, n.port);
-        n.enabled = prev_enabled.get(&n.id).copied().unwrap_or(true);
+        // 订阅更新 = 一次完整的重新验证周期：全部先启用，随后测速筛掉超时节点
+        //（auto_disable_timeout 开启时由测速链路自动停用）。上次的手动停用
+        // 状态不再沿用——机场节点质量会变化，以最新一轮测速为准。
+        n.enabled = true;
         if let Some(ob) = n.outbound.get_mut("tag") {
             if ob == "" {
                 *ob = json!(tag);
@@ -61,8 +60,6 @@ pub fn parse(
     }
     Ok(out)
 }
-
-use std::collections::HashMap;
 
 fn node_id(sub_id: &str, tag: &str, server: &str, port: i64) -> String {
     use md5::{Digest, Md5};

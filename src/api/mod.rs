@@ -361,7 +361,8 @@ impl Server {
                 sub.usage_total = info.total;
                 sub.expire = info.expire;
             }
-            let _ = self.store.upsert_subscription(sub);
+            let _ = self.store.upsert_subscription(sub.clone());
+            self.spawn_reapply_and_test(&sub);
             return Ok(prev.len());
         }
         self.store.save_nodes(&sub.id, &nodes).map_err(|e| e.to_string())?;
@@ -374,12 +375,73 @@ impl Server {
             sub.usage_total = info.total;
             sub.expire = info.expire;
         }
-        let _ = self.store.upsert_subscription(sub);
+        let _ = self.store.upsert_subscription(sub.clone());
+        self.spawn_reapply_and_test(&sub);
         Ok(nodes.len())
     }
 
+    /// 订阅更新成功（含 204）后，后台补一轮「重新下发配置 → 延迟测速」。
+    /// 关键点：节点库变了不等于内核变了——机场轮换 REALITY 参数后，内核
+    /// 还拿着旧出站跑，探活/流量会全部失败，必须重新渲染下发。
+    fn spawn_reapply_and_test(&self, sub: &Subscription) {
+        let Some(app) = GLOBAL_SERVER.get() else {
+            return;
+        };
+        let sub = sub.clone();
+        tokio::spawn(async move {
+            app.reapply_and_test_after_refresh(&sub).await;
+        });
+    }
+
+    /// 订阅更新后的完整收尾：重新渲染并与当前生效配置对比，变了才 apply
+    ///（内容未变不重启核心），最后测一轮延迟、按设置停用超时节点。
+    /// apply 失败时跳过测速——内核还是旧配置，测了必然全超时，会把
+    /// 刚启用的节点全部误杀。
+    pub(crate) async fn reapply_and_test_after_refresh(&self, sub: &Subscription) {
+        if !self.sup.running() {
+            eprintln!("订阅 {} 更新：核心未运行，跳过重新下发与测速", sub.name);
+            return;
+        }
+        // 与引擎切换互斥，避免渲染到一半内核被换掉
+        let _engine_g = self.engine_mu.lock().await;
+        let mut ready = false;
+        match self.render_config(&self.store.settings()).await {
+            Ok(raw) => {
+                let cur = self.store.config().unwrap_or_default();
+                if cur == raw {
+                    eprintln!("订阅 {} 更新：节点配置未变化，跳过重新下发", sub.name);
+                    ready = true;
+                } else {
+                    match tokio::time::timeout(
+                        APPLY_TIMEOUT,
+                        self.applier.apply(&raw, &format!("订阅 {} 更新，节点变更", sub.name)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            eprintln!("订阅 {} 更新：配置已重新下发", sub.name);
+                            self.clear_exit_ip().await;
+                            ready = true;
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("订阅 {} 更新：重新下发配置失败，跳过测速: {e}", sub.name)
+                        }
+                        Err(_) => {
+                            eprintln!("订阅 {} 更新：重新下发配置超时，跳过测速", sub.name)
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("订阅 {} 更新：重新渲染失败，跳过测速: {e}", sub.name),
+        }
+        if ready {
+            self.test_sub_nodes_after_refresh(sub).await;
+        }
+    }
+
     /// 每分钟检查一次，按每个订阅自己的间隔重新拉取。
-    pub fn start_scheduler(self: &Arc<Self>) {        let app = self.clone();
+    pub fn start_scheduler(self: &Arc<Self>) {
+        let app = self.clone();
         tokio::spawn(async move {
             // 失败重试下限：订阅源故障时不至于每分钟重试、刷日志。
             const RETRY_FLOOR: Duration = Duration::from_secs(600);
@@ -1225,12 +1287,9 @@ impl Server {
                 }
             }
         }
-        // 新订阅入库后也默认测一遍（核心未运行时自动跳过），后台执行
-        let app2 = app.clone();
-        let sub2 = sub.clone();
-        tokio::spawn(async move {
-            app2.test_sub_nodes_after_refresh(&sub2).await;
-        });
+        // 后台补一轮「重新下发配置（若变化）→ 测速」：核心在跑时导入的新节点
+        // 立即生效并完成验证，而不是等下次手动生成配置
+        app.spawn_reapply_and_test(&sub);
         json_ok(json!({"subscription": sub, "nodes": nodes.len(), "core_autostart": core_autostart}))
     }
 
@@ -1310,12 +1369,7 @@ impl Server {
             Err(e) => return err_json(StatusCode::BAD_GATEWAY, "fetch_failed", &e),
         };
         let sub = app.store.subscription(&id).unwrap_or(sub);
-        // 更新后默认来一遍测速：丢到后台跑，HTTP 响应不被测速拖住
-        let app2 = app.clone();
-        let sub2 = sub.clone();
-        tokio::spawn(async move {
-            app2.test_sub_nodes_after_refresh(&sub2).await;
-        });
+        // 重新下发配置 + 测速已由 refresh_one 内部丢到后台，不拖住 HTTP 响应
         json_ok(json!({"subscription": sub, "nodes": n}))
     }
 
@@ -1549,8 +1603,9 @@ impl Server {
         }))
     }
 
-    /// 保存测速设置。涉及内核策略组的字段（间隔/容差/延迟测速 URL）
-    /// 变更时自动重新渲染并下发配置，失败回滚设置。
+    /// 保存测速设置。涉及内核策略组的字段（间隔/容差/延迟测速 URL/选优方式）
+    /// 变更时自动重新渲染并下发配置；apply 失败回滚设置，渲染失败（典型：
+    /// 没有启用的节点）只保存设置并返回 applied=false + 原因。
     async fn h_speedtest_put(
         State(app): State<Arc<Server>>,
         headers: HeaderMap,
@@ -1633,32 +1688,42 @@ impl Server {
             || s2.auto_select_mode != prev.auto_select_mode;
 
         let mut applied = false;
+        let mut reason = String::new();
         if kernel_changed {
             // 与引擎切换互斥，避免渲染到一半内核被换掉
             let _engine_g = app.engine_mu.lock().await;
-            let raw = match app.render_config(&s2).await {
-                Ok(r) => r,
-                Err(e) => return err_json(StatusCode::BAD_REQUEST, "render_failed", &e),
-            };
-            if let Err(e) = app.store.save_settings(s2.clone()) {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
-            }
-            let apply_res =
-                tokio::time::timeout(APPLY_TIMEOUT, app.applier.apply(&raw, "测速设置变更")).await;
-            match apply_res {
-                Err(_) | Ok(Err(_)) => {
-                    let _ = app.store.save_settings(prev);
-                    app.failsafe_network().await;
-                    let msg = match apply_res {
-                        Ok(Err(e)) => e.to_string(),
-                        _ => "apply timeout".to_string(),
-                    };
-                    return err_json(StatusCode::BAD_REQUEST, "apply_failed", &msg);
+            match app.render_config(&s2).await {
+                Err(e) => {
+                    // 渲染失败（典型：还没有启用的节点）不是设置本身的错：
+                    // 设置照常落盘，等启用节点后点「生成配置」时生效
+                    if let Err(se) = app.store.save_settings(s2.clone()) {
+                        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &se.to_string());
+                    }
+                    reason = e;
                 }
-                Ok(Ok(())) => {}
+                Ok(raw) => {
+                    if let Err(e) = app.store.save_settings(s2.clone()) {
+                        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
+                    }
+                    let apply_res =
+                        tokio::time::timeout(APPLY_TIMEOUT, app.applier.apply(&raw, "测速设置变更"))
+                            .await;
+                    match apply_res {
+                        Err(_) | Ok(Err(_)) => {
+                            let _ = app.store.save_settings(prev);
+                            app.failsafe_network().await;
+                            let msg = match apply_res {
+                                Ok(Err(e)) => e.to_string(),
+                                _ => "apply timeout".to_string(),
+                            };
+                            return err_json(StatusCode::BAD_REQUEST, "apply_failed", &msg);
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                    app.clear_exit_ip().await;
+                    applied = true;
+                }
             }
-            app.clear_exit_ip().await;
-            applied = true;
         } else if let Err(e) = app.store.save_settings(s2.clone()) {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, "save_failed", &e.to_string());
         }
@@ -1666,6 +1731,7 @@ impl Server {
         json_ok(json!({
             "ok": true,
             "applied": applied,
+            "reason": reason,
             "settings": {
                 "urltest_interval_min": s2.urltest_interval_min,
                 "urltest_tolerance": s2.urltest_tolerance,
