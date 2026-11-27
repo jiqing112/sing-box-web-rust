@@ -1079,7 +1079,11 @@ async function openSpeedCfg() {
     const on = $('#cfgAutoDis').classList.toggle('on');
     $('#cfgAutoDis').setAttribute('aria-checked', String(on));
   };
-  $('#spdCfgOk').onclick = async () => {
+  // 保存不阻塞弹窗：点击即关闭，请求转后台，结果用 toast 汇报
+  let saving = false;
+  $('#spdCfgOk').onclick = () => {
+    if (saving) return;
+    saving = true;
     const body = {
       auto_select_mode: cfgMode,
       urltest_interval_min: parseInt($('#cfgItv').value, 10) || 10,
@@ -1090,22 +1094,20 @@ async function openSpeedCfg() {
       auto_disable_timeout: $('#cfgAutoDis').classList.contains('on'),
       delay_workers: parseInt($('#cfgWrk').value, 10) || 3
     };
-    const btn = $('#spdCfgOk');
-    btn.disabled = true; btn.textContent = '保存中…';
-    try {
-      const r = await api('/api/v1/settings/speedtest', { method: 'PUT', body: JSON.stringify(body) });
-      closeDialog(true);
-      if (r.reason) {
-        // 典型：还没有启用的节点。设置已保存，等启用节点后生成配置生效
-        toast('info', '已保存', `${r.reason}；启用节点后点「生成配置」即生效`);
-      } else {
-        toast('ok', '已保存', r.applied ? '配置已重新下发到内核' : '非内核项已生效');
-      }
-      if (r.settings?.delay_workers) $('#workersChip').textContent = `并发上限 ${r.settings.delay_workers}`;
-    } catch (e) {
-      toast('err', '保存失败', e.message);
-      btn.disabled = false; btn.textContent = '保存';
-    }
+    closeDialog(true);
+    toast('info', '正在保存测速设置', '涉及内核的改动会自动重新下发配置');
+    api('/api/v1/settings/speedtest', { method: 'PUT', body: JSON.stringify(body) })
+      .then((r) => {
+        if (r.reason) {
+          // 典型：还没有启用的节点。设置已保存，等启用节点后生成配置生效
+          toast('info', '已保存', `${r.reason}；启用节点后点「生成配置」即生效`);
+        } else {
+          toast('ok', '已保存', r.applied ? '配置已重新下发到内核' : '非内核项已生效');
+        }
+        if (r.settings?.delay_workers) $('#workersChip').textContent = `并发上限 ${r.settings.delay_workers}`;
+      })
+      .catch((e) => toast('err', '保存失败', e.message))
+      .finally(() => { saving = false; });
   };
 }
 
