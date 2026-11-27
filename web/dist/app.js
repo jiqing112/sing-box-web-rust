@@ -1024,11 +1024,12 @@ async function openSpeedCfg() {
     <div class="dialog-bd">
       <div class="field"><label>自动选优方式</label>
         <div class="seg-opts wz-fill" id="cfgMode">
-          <button type="button" data-mode="interval" class="${s.auto_select_mode !== 'failover' ? 'on' : ''}"><span class="o-t">定时全量测优<small>每间隔测一遍全部节点 · 默认</small></span></button>
+          <button type="button" data-mode="interval" class="${s.auto_select_mode === 'failover' || s.auto_select_mode === 'speed' ? '' : 'on'}"><span class="o-t">定时全量测优<small>每间隔测一遍全部节点 · 默认</small></span></button>
           <button type="button" data-mode="failover" class="${s.auto_select_mode === 'failover' ? 'on' : ''}"><span class="o-t">故障才切换<small>只保活探测当前节点 · 省资源</small></span></button>
+          <button type="button" data-mode="speed" class="${s.auto_select_mode === 'speed' ? 'on' : ''}"><span class="o-t">带宽优先<small>固定用 Mbps 最高的节点</small></span></button>
         </div>
       </div>
-      <div id="cfgItvWrap" style="display:${s.auto_select_mode === 'failover' ? 'none' : ''}">
+      <div id="cfgItvWrap" style="display:${s.auto_select_mode === 'interval' ? '' : 'none'}">
         <div class="cfg-grid">
           <div class="field"><label>自动选优间隔（分钟）</label><input class="input" id="cfgItv" type="number" min="1" max="1440" value="${s.urltest_interval_min ?? 10}" /></div>
           <div class="field"><label>切换容差（ms）</label><input class="input" id="cfgTol" type="number" min="1" max="1000" value="${s.urltest_tolerance ?? 50}" /></div>
@@ -1037,6 +1038,9 @@ async function openSpeedCfg() {
       </div>
       <div id="cfgFailHint" style="display:${s.auto_select_mode === 'failover' ? '' : 'none'}">
         <div class="hint">面板每 30 秒探测一次当前出口节点（单节点单请求），连续 2 次失败才全量重测全部启用节点并切到延迟最低的可用线路。内核侧只保留 24 小时一次的兜底全测。</div>
+      </div>
+      <div id="cfgSpeedHint" style="display:${s.auto_select_mode === 'speed' ? '' : 'none'}">
+        <div class="hint">流量固定在带宽测速结果最高的节点（候选要高出当前 25% 才切换，防止抖动）；当前节点故障时按带宽从高到低逐个探活切换，没有带宽数据时回落到延迟选优。请先跑一次「带宽测速」生成数据。内核侧只保留 24 小时一次的兜底全测。</div>
       </div>
       <div class="field"><label>连通性测速 URL（延迟）</label><input class="input mono-input" id="cfgDelayUrl" value="${esc(s.delay_test_url || '')}" /></div>
       <div class="field"><label>带宽测速 URL</label><input class="input mono-input" id="cfgSpeedUrl" value="${esc(s.speed_test_url || '')}" /></div>
@@ -1059,13 +1063,17 @@ async function openSpeedCfg() {
       <button class="btn primary" id="spdCfgOk">保存</button>
     </div>`;
   $('#dialogOverlay').classList.add('open');
-  let cfgMode = s.auto_select_mode === 'failover' ? 'failover' : 'interval';
+  let cfgMode = ['failover', 'speed'].includes(s.auto_select_mode) ? s.auto_select_mode : 'interval';
+  const syncModeUI = () => {
+    $('#cfgItvWrap').style.display = cfgMode === 'interval' ? '' : 'none';
+    $('#cfgFailHint').style.display = cfgMode === 'failover' ? '' : 'none';
+    $('#cfgSpeedHint').style.display = cfgMode === 'speed' ? '' : 'none';
+  };
   $$('#cfgMode button').forEach((b) => (b.onclick = () => {
     $$('#cfgMode button').forEach((x) => x.classList.remove('on'));
     b.classList.add('on');
     cfgMode = b.dataset.mode;
-    $('#cfgItvWrap').style.display = cfgMode === 'failover' ? 'none' : '';
-    $('#cfgFailHint').style.display = cfgMode === 'failover' ? '' : 'none';
+    syncModeUI();
   }));
   $('#cfgAutoDis').onclick = () => {
     const on = $('#cfgAutoDis').classList.toggle('on');

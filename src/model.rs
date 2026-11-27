@@ -159,7 +159,8 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub auto_disable_timeout: bool,
     /// 自动选优方式：interval = 内核定时全量测优（默认）；
-    /// failover = 平时只探测当前节点，故障时才全量测速并切换（面板接管选路）
+    /// failover = 只探测当前节点，故障时按延迟全量切换（面板接管选路）；
+    /// speed = 按带宽测速结果选 Mbps 最高的节点（面板接管选路）
     #[serde(default)]
     pub auto_select_mode: String,
     /// 首次运行向导已完成（完成后不再弹引导）

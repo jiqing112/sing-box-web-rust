@@ -52,8 +52,8 @@ pub fn render_clash(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec
     // 策略组名字与 sing-box 那套保持一致（proxy / auto）
     let mut select_members: Vec<Value> = vec![json!("auto"), json!("DIRECT")];
     select_members.extend(tags.iter().cloned());
-    // failover 模式：内核侧 24h 兜底全测一次，保活/切换由面板负责
-    let interval_sec = if opts.failover_mode() {
+    // 面板接管选路（failover/speed）：内核侧 24h 兜底全测一次
+    let interval_sec = if opts.panel_managed() {
         24 * 3600
     } else {
         opts.urltest_interval() * 60

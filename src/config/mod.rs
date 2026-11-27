@@ -68,10 +68,10 @@ impl RenderOpts {
         }
     }
 
-    /// failover（按需测优）模式：内核侧几乎不做定时全量测速，
-    /// 由面板探测当前节点、故障时全量重测并切换。
-    pub fn failover_mode(&self) -> bool {
-        self.auto_select_mode == "failover"
+    /// 面板接管选路的模式（failover / speed）：内核侧几乎不做定时全量测速，
+    /// 由面板负责保活探测与切换（延迟最低 or 带宽最高）。
+    pub fn panel_managed(&self) -> bool {
+        self.auto_select_mode == "failover" || self.auto_select_mode == "speed"
     }
 
     /// urltest 自动选优间隔（分钟），非法值回落 10。
@@ -162,8 +162,8 @@ fn render_sing_box(tpl: Value, nodes: &[Node], opts: &RenderOpts) -> Result<Vec<
         "outbounds": sel_members,
         "default": "auto"
     }));
-    // failover 模式下内核侧只留 24h 一次的兜底全测；日常保活与故障切换由面板负责
-    let interval = if opts.failover_mode() {
+    // 面板接管选路（failover/speed）时内核侧只留 24h 一次的兜底全测
+    let interval = if opts.panel_managed() {
         "24h".to_string()
     } else {
         format!("{}m", opts.urltest_interval())

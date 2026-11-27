@@ -104,6 +104,21 @@ proxies:
         assert_eq!(auto["tolerance"], 80);
         assert_eq!(auto["url"], "https://example.com/204");
 
+        // 面板接管选路的两种模式（failover/speed）：内核侧降到 24h 兜底
+        for mode in ["failover", "speed"] {
+            let mut om = opts("sing-box");
+            om.auto_select_mode = mode.into();
+            let cfg_m: Value = serde_json::from_slice(
+                &crate::config::render(tpl.clone(), &nodes, &om).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                cfg_m["outbounds"].as_array().unwrap().get(1).unwrap()["interval"],
+                "24h",
+                "mode={mode}"
+            );
+        }
+
         // mihomo：分钟 → 秒
         let tpl_m: Value = serde_yaml::from_str(crate::store::default_clash_template()).unwrap();
         let mut om = opts("mihomo");

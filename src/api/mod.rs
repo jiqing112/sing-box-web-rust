@@ -482,18 +482,25 @@ impl Server {
         });
     }
 
-    /// failover（按需测优）模式的保活监控：平时只探测当前出口节点（30 秒一次、
-    /// 一个 204 请求），连续两次失败才全量重测启用节点并切到最快的那个。
-    /// 内核侧的定时全测在渲染时已降到 24h 兜底，日常工作由本任务承担。
-    pub fn start_failover_monitor(self: &Arc<Self>) {
+    /// 选路监控（failover / speed 两种面板接管模式共用）：
+    /// - failover：平时只探测当前节点（30 秒一次、一个 204 请求），连续 2 次
+    ///   失败才全量延迟重测并切到延迟最低的可用节点；
+    /// - speed（带宽优先）：流量固定在带宽测速结果最高的节点（高出当前 25%
+    ///   才切换，防抖动）；当前节点故障时按带宽从高到低逐个探活切换，
+    ///   无带宽数据时回落到延迟选优。
+    /// 内核侧的定时全测在这两种模式下已降到 24h 兜底，日常工作由本任务承担。
+    pub fn start_selection_monitor(self: &Arc<Self>) {
         let app = self.clone();
         tokio::spawn(async move {
             const PROBE_EVERY: Duration = Duration::from_secs(30);
             const FAIL_THRESHOLD: i32 = 2;
+            /// 带宽升级门槛：候选要高出当前 25% 才切换，防止测速抖动来回跳
+            const SPEED_UPGRADE_RATIO: f64 = 1.25;
             let mut fail_count: i32 = 0;
             loop {
                 tokio::time::sleep(PROBE_EVERY).await;
-                if app.store.settings().auto_select_mode != "failover" || !app.sup.running() {
+                let mode = app.store.settings().auto_select_mode.clone();
+                if (mode != "failover" && mode != "speed") || !app.sup.running() {
                     continue;
                 }
                 // 当前真正承载流量的节点（顺着 selector → urltest 解析到底）
@@ -518,6 +525,9 @@ impl Server {
                 .unwrap_or(-1);
                 if ms >= 0 {
                     fail_count = 0;
+                    if mode == "speed" {
+                        app.upgrade_to_faster_node(&active, SPEED_UPGRADE_RATIO).await;
+                    }
                     continue;
                 }
                 fail_count += 1;
@@ -525,36 +535,128 @@ impl Server {
                     continue;
                 }
                 fail_count = 0;
-                // 当前节点挂了：全量重测，切到延迟最低的可用节点
-                let tags: Vec<String> = app
-                    .store
-                    .all_nodes()
-                    .iter()
-                    .filter(|n| n.enabled)
-                    .map(|n| n.tag.clone())
-                    .collect();
-                if tags.is_empty() {
+                // 当前节点挂了：按模式选替换节点
+                if mode == "speed" && app.failover_by_bandwidth(&active).await {
                     continue;
                 }
-                let measured = measure_delays(&app, tags).await;
-                let best = measured
-                    .iter()
-                    .filter(|(_, ms)| *ms >= 0)
-                    .min_by_key(|(_, ms)| *ms)
-                    .map(|(t, _)| t.clone());
-                match best {
-                    Some(best) if best != active => {
-                        if app.clash.select_proxy("proxy", &best).await.is_ok() {
-                            eprintln!("failover: 当前节点 {active} 故障，已切换到 {best}");
-                        } else {
-                            eprintln!("failover: 切换到 {best} 失败，保持 {active}");
-                        }
-                    }
-                    Some(_) => {} // 最快的仍是当前节点（探测抖动），保持不动
-                    None => eprintln!("failover: 当前节点 {active} 故障，全量测速无可用节点"),
+                if mode == "speed" {
+                    eprintln!("选路: 无可用带宽候选，回落到延迟选优");
                 }
+                app.failover_by_latency(&active).await;
             }
         });
+    }
+
+    /// 探活单个节点（结果顺带写延迟缓存），活着返回 true。
+    async fn node_alive(&self, tag: &str) -> bool {
+        let ms = tokio::time::timeout(Duration::from_secs(6), self.clash.delay(tag, 5000))
+            .await
+            .unwrap_or(Err(String::new()))
+            .unwrap_or(-1);
+        ms >= 0
+    }
+
+    /// 带宽候选：启用节点里带有效带宽测速结果（bps >= 0）的，按 Mbps 从高到低。
+    fn bandwidth_candidates(&self, exclude: &str) -> Vec<(String, i64)> {
+        let speeds = self.store.speeds();
+        let mut cands: Vec<(String, i64)> = self
+            .store
+            .all_nodes()
+            .iter()
+            .filter(|n| n.enabled && n.tag != exclude)
+            .filter_map(|n| {
+                speeds
+                    .get(&n.tag)
+                    .filter(|s| s.bps >= 0)
+                    .map(|s| (n.tag.clone(), s.bps))
+            })
+            .collect();
+        cands.sort_by(|a, b| b.1.cmp(&a.1));
+        cands
+    }
+
+    /// speed 模式：当前节点活着，看有没有带宽明显更高（≥ ratio）的候选，
+    /// 有则探活后切换。当前节点自己没有带宽数据时不动作（等带宽测速覆盖）。
+    async fn upgrade_to_faster_node(&self, active: &str, ratio: f64) {
+        let speeds = self.store.speeds();
+        let Some(active_bps) = speeds.get(active).map(|s| s.bps).filter(|b| *b >= 0) else {
+            return;
+        };
+        let Some((cand, cand_bps)) = self.bandwidth_candidates(active).into_iter().next() else {
+            return;
+        };
+        if (cand_bps as f64) < active_bps as f64 * ratio {
+            return;
+        }
+        if self.node_alive(&cand).await {
+            if self.clash.select_proxy("proxy", &cand).await.is_ok() {
+                eprintln!(
+                    "选路: 带宽优先，{active}（{:.1} Mbps）→ {cand}（{:.1} Mbps）",
+                    active_bps as f64 / 1e6,
+                    cand_bps as f64 / 1e6
+                );
+            }
+        } else {
+            // 探活失败：带宽结果标记为失败，下一轮不再作为候选
+            self.store.set_speed(&cand, -1);
+        }
+    }
+
+    /// speed 模式故障切换：按带宽从高到低逐个探活，切到第一个活着的。
+    /// 探活失败的候选把带宽结果标记为 -1（下一轮不再候选）。
+    /// 返回 true 表示已处理（切换成功或确认无可切）；false = 没有带宽数据，回落延迟选优。
+    async fn failover_by_bandwidth(&self, dead: &str) -> bool {
+        let cands = self.bandwidth_candidates(dead);
+        if cands.is_empty() {
+            return false;
+        }
+        for (tag, bps) in cands.iter() {
+            if self.node_alive(tag).await {
+                if self.clash.select_proxy("proxy", tag).await.is_ok() {
+                    eprintln!(
+                        "选路: 当前节点 {dead} 故障，按带宽切换到 {tag}（{:.1} Mbps）",
+                        *bps as f64 / 1e6
+                    );
+                    return true;
+                }
+            } else {
+                self.store.set_speed(tag, -1);
+            }
+        }
+        // 带宽候选全部探活失败：回落到延迟全测（可能找到没测过带宽的活节点）
+        false
+    }
+
+    /// failover 模式的替换策略：全量延迟重测，切到延迟最低的可用节点。
+    async fn failover_by_latency(&self, dead: &str) {
+        let tags: Vec<String> = self
+            .store
+            .all_nodes()
+            .iter()
+            .filter(|n| n.enabled)
+            .map(|n| n.tag.clone())
+            .collect();
+        if tags.is_empty() {
+            eprintln!("选路: 当前节点 {dead} 故障，但没有启用节点");
+            return;
+        }
+        let measured = measure_delays(self, tags).await;
+        let best = measured
+            .iter()
+            .filter(|(_, ms)| *ms >= 0)
+            .min_by_key(|(_, ms)| *ms)
+            .map(|(t, _)| t.clone());
+        match best {
+            Some(best) if best != dead => {
+                if self.clash.select_proxy("proxy", &best).await.is_ok() {
+                    eprintln!("选路: 当前节点 {dead} 故障，已切换到 {best}");
+                } else {
+                    eprintln!("选路: 切换到 {best} 失败，保持 {dead}");
+                }
+            }
+            Some(_) => {} // 最快的仍是当前节点（探测抖动），保持不动
+            None => eprintln!("选路: 当前节点 {dead} 故障，全量测速无可用节点"),
+        }
     }
 
     /// 订阅刷新成功后默认来一遍延迟测速：实测该订阅全部启用节点（不走缓存，
@@ -1592,7 +1694,10 @@ impl Server {
         }
         let set = app.store.settings();
         json_ok(json!({
-            "auto_select_mode": if set.auto_select_mode == "failover" { "failover" } else { "interval" },
+            "auto_select_mode": match set.auto_select_mode.as_str() {
+                "failover" | "speed" => set.auto_select_mode.as_str(),
+                _ => "interval",
+            },
             "urltest_interval_min": if set.urltest_interval_min > 0 { set.urltest_interval_min } else { 10 },
             "urltest_tolerance": if set.urltest_tolerance > 0 { set.urltest_tolerance } else { 50 },
             "delay_test_url": if set.delay_test_url.trim().is_empty() { crate::model::DEFAULT_DELAY_TEST_URL } else { set.delay_test_url.trim() },
@@ -1672,11 +1777,11 @@ impl Server {
             s2.delay_workers = w.clamp(1, 16);
         }
         if let Some(m) = inb.get("auto_select_mode").and_then(|v| v.as_str()) {
-            if m != "interval" && m != "failover" {
+            if !matches!(m, "interval" | "failover" | "speed") {
                 return err_json(
                     StatusCode::BAD_REQUEST,
                     "bad_mode",
-                    "自动选优方式只能是 interval / failover",
+                    "自动选优方式只能是 interval / failover / speed",
                 );
             }
             s2.auto_select_mode = m.to_string();
