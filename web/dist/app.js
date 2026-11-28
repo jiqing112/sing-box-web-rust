@@ -915,7 +915,7 @@ function renderNodes() {
       const sp = state.speeds[n.tag];
       const bps = sp ? sp.bps : undefined;
       const sc = spdClass(bps);
-      return `<tr>
+      return `<tr data-tag="${esc(n.tag)}">
         <td><div class="cell-main">
           <span class="flag" style="background:${regionColor(n.region)}">${esc(n.region || '??')}</span>
           <div class="col"><div class="t">${esc(stripFlag(n.name))}</div><div class="s">${esc(n.sub_id.slice(-6))}</div></div>
@@ -970,11 +970,11 @@ async function testAll() {
       await loadNodes();
     }
     renderNodes(); renderDashNodes(); renderStatus();
-    toast('ok', '测速完成',
+    toast('ok', '连通测试完成',
       (cached ? `实测 ${tags.length - cached} 个，${cached} 个命中缓存` : `${tags.length} 个节点全部实测`)
       + (disabled.length ? ` · 已自动停用 ${disabled.length} 个超时节点` : ''));
   } catch (e) {
-    toast('err', '测速失败', e.message);
+    toast('err', '连通测试失败', e.message);
   } finally {
     state.testRunning = false;
     $('#testAllBtn').disabled = false;
@@ -989,13 +989,41 @@ async function speedAll() {
   await runSpeedTest(filteredNodes().map((n) => n.tag));
 }
 
-// 带宽测速是串行的（后端要逐个临时切换出口节点），期间禁止再次触发
+// 带宽测速是串行的（后端要逐个临时切换出口节点），期间禁止再次触发。
+// 后端逐节点上报进度（/nodes/speed/status），当前节点在表上做动态特效。
+let speedPoll = null;
+
+function markTestingRow(tag) {
+  $$('#nodeTable tbody tr.spd-testing').forEach((tr) => tr.classList.remove('spd-testing'));
+  if (!tag) return;
+  const tr = $(`#nodeTable tbody tr[data-tag="${CSS.escape(tag)}"]`);
+  if (tr) tr.classList.add('spd-testing');
+}
+
+function startSpeedPoll() {
+  stopSpeedPoll();
+  speedPoll = setInterval(async () => {
+    try {
+      const st = await api('/api/v1/nodes/speed/status');
+      if (!st.running) return;
+      $('#stProgress').textContent = `带宽测速中 ${st.done}/${st.total}` + (st.current ? ` · ${st.current}` : '');
+      markTestingRow(st.current);
+    } catch (e) { /* 瞬时失败下一轮再取 */ }
+  }, 800);
+}
+
+function stopSpeedPoll() {
+  if (speedPoll) { clearInterval(speedPoll); speedPoll = null; }
+  markTestingRow('');
+}
+
 async function runSpeedTest(tags) {
   if (state.speedRunning) return;
   state.speedRunning = true;
   $('#speedAllBtn').disabled = true;
   const prev = $('#stProgress').textContent;
-  $('#stProgress').textContent = `带宽测速中… 0/${tags.length}`;
+  $('#stProgress').textContent = `带宽测速中 0/${tags.length}`;
+  startSpeedPoll();
   try {
     const d = await api('/api/v1/nodes/speed', { method: 'POST', body: JSON.stringify({ tags }) });
     state.speeds = d.speeds || state.speeds;
@@ -1008,6 +1036,7 @@ async function runSpeedTest(tags) {
     $('#stProgress').textContent = prev;
     toast('err', '带宽测速失败', e.message);
   } finally {
+    stopSpeedPoll();
     state.speedRunning = false;
     $('#speedAllBtn').disabled = false;
   }
@@ -1018,7 +1047,7 @@ async function runSpeedTest(tags) {
 async function openSpeedCfg() {
   let s;
   try { s = await api('/api/v1/settings/speedtest'); }
-  catch (e) { toast('err', '读取测速设置失败', e.message); return; }
+  catch (e) { toast('err', '读取失败', e.message); return; }
   const MODE_HINT = {
     interval: '按设定间隔测试全部启用节点，自动切换至延迟最低者。',
     failover: '仅探测当前节点，连续失败后全量重测并切换。',
@@ -1030,7 +1059,7 @@ async function openSpeedCfg() {
     speed: '候选高出当前带宽 25% 才切换；无带宽数据时回落延迟选优'
   };
   $('#dialog').innerHTML = `
-    <div class="dialog-hd"><h3>测速设置</h3></div>
+    <div class="dialog-hd"><h3>节点选择</h3></div>
     <div class="dialog-bd">
       <div class="field">
         <label>自动选优</label>
@@ -1095,7 +1124,7 @@ async function openSpeedCfg() {
       delay_workers: parseInt($('#cfgWrk').value, 10) || 3
     };
     closeDialog(true);
-    toast('info', '正在保存测速设置', '涉及内核的改动会自动重新下发配置');
+    toast('info', '正在保存', '涉及内核的改动会自动重新下发配置');
     api('/api/v1/settings/speedtest', { method: 'PUT', body: JSON.stringify(body) })
       .then((r) => {
         if (r.reason) {
@@ -2736,7 +2765,7 @@ const COMMANDS = [
   { g: '页面', t: '局域网代理', p: 'lanproxy', i: 'i-lan' },
   { g: '页面', t: '实时连接', p: 'conns', i: 'i-list' },
   { g: '操作', t: '重启内核', a: () => serviceAction('restart'), i: 'i-refresh' },
-  { g: '操作', t: '全部节点测速', a: () => { go('nodes'); testAll(); }, i: 'i-zap' },
+  { g: '操作', t: '全部节点连通测试', a: () => { go('nodes'); testAll(); }, i: 'i-zap' },
   { g: '操作', t: '校验当前配置', a: () => { go('config'); validateConfig(); }, i: 'i-check' },
   { g: '操作', t: '新增订阅', a: () => { go('subs'); openAddSub(); }, i: 'i-plus' }
 ];

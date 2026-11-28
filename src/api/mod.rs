@@ -77,6 +77,10 @@ pub struct Server {
     /// 三处状态，并发切换（双击）或切换与应用并发会把三处指向不同内核。
     pub(crate) engine_mu: tokio::sync::Mutex<()>,
 
+    /// 带宽测速进度（当前测试节点/完成数/总数）：前端轮询 /nodes/speed/status
+    /// 在节点表上做动态特效。
+    speed_prog: std::sync::Mutex<SpeedProg>,
+
     /// 最近一次 API 请求的时间戳（UnixNano），空闲回收据此判断。
     pub last_req: AtomicI64,
 }
@@ -86,6 +90,15 @@ struct Attempt {
     fails: i64,
     until: std::time::Instant,
     last: std::time::Instant,
+}
+
+/// 带宽测速的实时进度。
+#[derive(Clone, Default)]
+struct SpeedProg {
+    running: bool,
+    current: String,
+    done: usize,
+    total: usize,
 }
 
 // 登录限速：同一来源连续失败 5 次后锁定 30 秒，之后每多失败一次翻倍，最长 15 分钟。
@@ -132,6 +145,7 @@ impl Server {
             listen_pinned: std::sync::atomic::AtomicBool::new(false),
             exit_ip: tokio::sync::Mutex::new(None),
             engine_mu: tokio::sync::Mutex::new(()),
+            speed_prog: std::sync::Mutex::new(SpeedProg::default()),
             last_req: AtomicI64::new(0),
         })
     }
@@ -184,6 +198,7 @@ impl Server {
             .route("/api/v1/nodes", get(Self::h_list_nodes))
             .route("/api/v1/nodes/delay", post(Self::h_delay_nodes))
             .route("/api/v1/nodes/speed", post(Self::h_speed_nodes))
+            .route("/api/v1/nodes/speed/status", get(Self::h_speed_status))
             .route("/api/v1/nodes/{id}", put(Self::h_toggle_node))
             .route(
                 "/api/v1/settings/speedtest",
@@ -1603,6 +1618,15 @@ impl Server {
         {
             return err_json(StatusCode::CONFLICT, "speed_busy", "已有带宽测速正在进行，请稍候");
         }
+        // 进度状态：前端轮询 /nodes/speed/status 在节点表上做动态特效
+        {
+            *app.speed_prog.lock().unwrap() = SpeedProg {
+                running: true,
+                current: String::new(),
+                done: 0,
+                total: 0,
+            };
+        }
         let inb: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         let tags_in: Vec<String> = inb
             .get("tags")
@@ -1614,11 +1638,30 @@ impl Server {
             })
             .unwrap_or_default();
         let out = Self::speed_test_impl(&app, tags_in).await;
+        {
+            let mut p = app.speed_prog.lock().unwrap();
+            p.running = false;
+            p.current = String::new();
+        }
         SPEED_BUSY.store(false, Ordering::SeqCst);
         match out {
             Ok(v) => json_ok(v),
             Err((code, kind, msg)) => err_json(code, kind, &msg),
         }
+    }
+
+    /// 带宽测速实时进度：{"running","current","done","total"}。
+    async fn h_speed_status(State(app): State<Arc<Server>>, headers: HeaderMap) -> Response {
+        if let Some(resp) = app.authed(&headers) {
+            return resp;
+        }
+        let p = app.speed_prog.lock().unwrap().clone();
+        json_ok(json!({
+            "running": p.running,
+            "current": p.current,
+            "done": p.done,
+            "total": p.total,
+        }))
     }
 
     async fn speed_test_impl(
@@ -1650,8 +1693,16 @@ impl Server {
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, "clash_error", format!("读取当前出口失败：{e}")))?;
 
+        {
+            let mut p = app.speed_prog.lock().unwrap();
+            p.total = tags.len();
+        }
         let mut results: Vec<Value> = Vec::with_capacity(tags.len());
         for tag in tags.iter() {
+            {
+                let mut p = app.speed_prog.lock().unwrap();
+                p.current = tag.clone();
+            }
             let switched = app.clash.select_proxy(group, tag).await.is_ok();
             let bps = if switched {
                 let proxy = format!("http://127.0.0.1:{mixed_port}");
@@ -1674,6 +1725,11 @@ impl Server {
                 app.store.set_speed(tag, -1);
                 -1
             };
+            {
+                let mut p = app.speed_prog.lock().unwrap();
+                p.done += 1;
+                p.current = String::new();
+            }
             results.push(json!({"tag": tag, "bps": bps}));
         }
         // 恢复原选择；原成员已失效（如刚被自动停用）时兜底切回 auto

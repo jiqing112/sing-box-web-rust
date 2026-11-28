@@ -1559,3 +1559,23 @@ a { color: inherit; text-decoration: none; }
 @supports (corner-shape: superellipse(2)) {
   .dialog, .wizard, .palette, .toast, .login-card, .card { corner-shape: superellipse(2); }
 }
+
+/* ============================================================ 带宽测速进行中：当前节点动态特效 */
+
+#nodeTable tbody tr.spd-testing { background: var(--overlay-1); }
+#nodeTable tbody tr.spd-testing .lat.spd { color: var(--lime); }
+#nodeTable tbody tr.spd-testing .lat.spd::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: var(--lime);
+  vertical-align: middle;
+  animation: spdDot 0.9s ease-in-out infinite alternate;
+}
+@keyframes spdDot {
+  from { opacity: 0.15; transform: scale(0.6); }
+  to   { opacity: 1;    transform: scale(1.15); box-shadow: 0 0 0 3px var(--lime-soft); }
+}

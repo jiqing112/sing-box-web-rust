@@ -105,6 +105,7 @@
         <button class="btn ghost sm topbar-restart" id="topRestartBtn" data-action="restart" title="重启核心"><svg width="13" height="13"><use href="#i-refresh"/></svg><span>重启核心</span></button>
         <span class="chip" id="topStatus"><i class="dot"></i> 检测中</span>
         <span class="chip" id="topVersion" style="display:none"></span>
+        <button class="icon-btn" id="speedCfgBtn" title="节点选择"><svg width="15" height="15"><use href="#i-settings"/></svg></button>
         <button class="theme-toggle" id="themeToggle" title="切换深浅色" aria-label="切换深浅色">
           <svg width="15" height="15"><use href="#i-moon" id="themeIcon"/></svg>
         </button>
@@ -230,9 +231,8 @@
           <div class="page-head">
             <h1>节点</h1>
             <div class="page-actions">
-              <button class="btn icon-btn" id="speedCfgBtn" title="测速设置"><svg width="14" height="14"><use href="#i-settings"/></svg></button>
               <button class="btn" id="speedAllBtn" title="逐节点测带宽（串行执行）"><svg width="13" height="13"><use href="#i-arrow-up"/></svg>带宽测速</button>
-              <button class="btn" id="testAllBtn"><svg width="13" height="13"><use href="#i-zap"/></svg>全部测速</button>
+              <button class="btn" id="testAllBtn"><svg width="13" height="13"><use href="#i-zap"/></svg>连通测试</button>
               <button class="btn primary" data-goto="config"><svg width="13" height="13"><use href="#i-code"/></svg>生成配置</button>
             </div>
           </div>
